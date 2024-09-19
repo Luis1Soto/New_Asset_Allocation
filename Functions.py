@@ -60,8 +60,6 @@ class LoadData:
         return closing_prices, self.financial_dataframes
 
 
-import pandas as pd
-
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
         """
@@ -79,6 +77,7 @@ class TestStrategy:
         self.offensive = offensive
         self.defensive = defensive
         self.protective = protective
+        self.momentum_data = pd.DataFrame()  # Store momentum values for each decision date
 
     def calculate_monthly_returns(self, price_series):
         """
@@ -141,6 +140,10 @@ class TestStrategy:
         # Calculate absolute momentum (average momentum of all protective tickers)
         avg_momentum = pd.Series(momentum_data).mean()
 
+        # Store momentum for reference
+        momentum_data['Average'] = avg_momentum
+        self.momentum_data = self.momentum_data = pd.concat([self.momentum_data, pd.DataFrame(momentum_data, index=[date])])
+
         if avg_momentum > 0:
             return "Offensive"
         else:
@@ -157,26 +160,54 @@ class TestStrategy:
         Returns:
         pd.DataFrame: A DataFrame with the date and the chosen universe for each 6-month period.
         """
+        # Convert start_date and end_date to Timestamps
         start_date = pd.to_datetime(start_date)
         if end_date is None:
+            # Use the most recent date available in the price data for any protective ticker
             end_date = max([self.prices[ticker].index[-1] for ticker in self.protective])
+
+        # Initialize the decision date to be 12 months after the start_date
         decision_date = start_date + pd.DateOffset(months=12)
         results = []
 
         while decision_date <= end_date:
+            # Make a decision at the current decision_date
             chosen_universe = self.decide_universe(decision_date)
             results.append({
                 'Date': decision_date,
                 'Chosen Universe': chosen_universe
             })
+
+            # Move forward 6 months for the next decision
             decision_date += pd.DateOffset(months=6)
+
+        # Convert the results to a DataFrame
         return pd.DataFrame(results)
 
+    def get_momentum_dataframe(self):
+        """
+        Get a DataFrame containing the momentum values for each decision date.
+        
+        Returns:
+        pd.DataFrame: DataFrame containing the momentum of protective tickers over time.
+        """
+        return self.momentum_data
 
+# Example usage:
+# loader = LoadData(r'C:\path\to\folder')
+# loader.process_excel_files()
+# prices = loader.download_daily_closing_prices(start_date='2020-01-01')
+# financials = loader.get_financial_dataframes()
 
+# offensive_tickers = ['AAPL', 'MSFT', 'GOOGL']
+# defensive_tickers = ['JNJ', 'PG', 'KO']
+# protective_tickers = ['TLT', 'GLD', 'VIX']
 
+# strategy = TestStrategy(prices, financials, offensive_tickers, defensive_tickers, protective_tickers)
 # strategy_results = strategy.run_strategy(start_date='2020-01-01')
+# momentum_df = strategy.get_momentum_dataframe()
 # print(strategy_results)
+# print(momentum_df)
 
 
 
