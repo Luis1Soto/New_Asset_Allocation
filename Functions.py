@@ -1,6 +1,11 @@
 import yfinance as yf
 import os
 import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+import scipy.optimize as sco
+import numpy as np
+import matplotlib.pyplot as plt
+
 
 class LoadData:
     def __init__(self, folder_path):
@@ -67,10 +72,6 @@ class LoadData:
                 print(f"No data found for {ticker}.")
 
         return closing_prices, self.financial_dataframes
-
-
-import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
@@ -291,16 +292,262 @@ class TestStrategy:
         """
         return self.momentum_data
 
+class Backtesting:
+    def __init__(self, results, prices, initial_capital):
+        """
+        Initialize the Backtesting object with strategy results, asset prices, and initial capital.
+        
+        Parameters:
+        - results (pd.DataFrame): DataFrame containing the results of the strategy (run_strategy output).
+        - prices (dict): Dictionary of tickers with their corresponding price data.
+        - initial_capital (float): Initial capital for the portfolio.
+        """
+        self.results = results
+        self.prices = prices
+        self.initial_capital = initial_capital
 
+    def rebalance(self, date, selected_stocks, universe_type, method="equal_weight"):
+        """
+        Rebalance the portfolio on the given date based on the selected stocks and rebalancing method.
+        
+        Parameters:
+        - date (pd.Timestamp): The date of the rebalancing.
+        - selected_stocks (list): List of selected tickers for rebalancing.
+        - universe_type (str): Type of universe, either 'Defensive' or 'Offensive'.
+        - method (str): Method of asset allocation optimization (equal_weight, sharpe, omega, etc.)
+        
+        Returns:
+        dict: Dictionary containing the weights assigned to each asset.
+        """
+        if universe_type == "Defensive":
+            # Defensive universe: equal weight allocation
+            weights = np.ones(len(selected_stocks)) / len(selected_stocks)
+        
+        elif universe_type == "Offensive":
+            # Offensive universe: use optimization methods
+            if method == "equal_weight":
+                weights = np.ones(len(selected_stocks)) / len(selected_stocks)
+            elif method == "sharpe":
+                weights = self.optimize_sharpe_ratio(selected_stocks)
+            elif method == "omega":
+                weights = self.optimize_omega_ratio(selected_stocks)
+            elif method == "sortino":
+                weights = self.optimize_sortino_ratio(selected_stocks)
+            elif method == "cvar":
+                weights = self.optimize_cvar(selected_stocks)
+            else:
+                raise ValueError(f"Unknown optimization method: {method}")
+            
+            # Si la optimización falla o devuelve None, asignar pesos iguales
+            if weights is None or not np.any(weights):
+                weights = np.ones(len(selected_stocks)) / len(selected_stocks)
+    
+        return dict(zip(selected_stocks, weights))
 
+    def run_backtest(self):
+        """
+        Run the backtest for multiple portfolio optimization strategies (CVaR, Sharpe, Sortino, etc.)
+        
+        Returns:
+        pd.DataFrame: DataFrame containing the portfolio values over time for each strategy.
+        """
+        # Inicializar los portafolios con el capital inicial
+        portfolio_values = {
+            "CVaR": self.initial_capital,
+            "Sharpe": self.initial_capital,
+            "Sortino": self.initial_capital,
+            "Equal Weight": self.initial_capital
+        }
 
+        # Almacenar el historial del valor de los portafolios
+        portfolio_history = []
 
+        # Iterar sobre los resultados (fechas de rebalanceo)
+        for index, row in self.results.iterrows():
+            date = row['Date']
+            selected_stocks = row['Selected Stocks']
+            universe = row['Chosen Universe']
 
+            # Rebalancear cada estrategia de optimización
+            weights_cvar = self.rebalance(date, selected_stocks, universe, method="cvar")
+            weights_sharpe = self.rebalance(date, selected_stocks, universe, method="sharpe")
+            weights_sortino = self.rebalance(date, selected_stocks, universe, method="sortino")
+            weights_equal = self.rebalance(date, selected_stocks, universe, method="equal_weight")
 
+            # Actualizar el valor de los portafolios en base a los retornos de los activos seleccionados
+            portfolio_values["CVaR"] *= (1 + self.get_portfolio_return(weights_cvar, date))
+            portfolio_values["Sharpe"] *= (1 + self.get_portfolio_return(weights_sharpe, date))
+            portfolio_values["Sortino"] *= (1 + self.get_portfolio_return(weights_sortino, date))
+            portfolio_values["Equal Weight"] *= (1 + self.get_portfolio_return(weights_equal, date))
 
+            # Registrar el valor de los portafolios en el historial
+            portfolio_history.append({
+                "Date": date,
+                "CVaR": portfolio_values["CVaR"],
+                "Sharpe": portfolio_values["Sharpe"],
+                "Sortino": portfolio_values["Sortino"],
+                "Equal Weight": portfolio_values["Equal Weight"]
+            })
 
+        return pd.DataFrame(portfolio_history)
 
+    
+    def get_asset_returns(self, selected_stocks):
+        """
+        Retrieve historical returns for the selected stocks.
+        
+        Parameters:
+        - selected_stocks (list): List of selected tickers.
+        
+        Returns:
+        pd.DataFrame: A DataFrame containing historical returns for the selected assets.
+        """
+        asset_returns = pd.DataFrame()
+    
+        for ticker in selected_stocks:
+            if ticker in self.prices:
+                # Calcular los retornos diarios de cada activo
+                returns = self.prices[ticker].pct_change().dropna()
+                asset_returns[ticker] = returns
+        
+        return asset_returns
 
+    def get_portfolio_return(self, weights, date):
+        """
+        Calculate the portfolio return based on the weights and asset returns.
+        
+        Parameters:
+        - weights (dict): Dictionary of asset weights.
+        - date (pd.Timestamp): Date for which to calculate the returns.
+        
+        Returns:
+        float: Portfolio return since the last rebalancing.
+        """
+        portfolio_return = 0
+        for ticker, weight in weights.items():
+            if ticker in self.prices:
+                price_data = self.prices[ticker]
+                if date in price_data.index:
+                    # Calcular el retorno del activo desde el último rebalanceo
+                    previous_price = price_data.loc[date]
+                    current_price = price_data.iloc[-1]
+                    asset_return = (current_price / previous_price) - 1
+                    portfolio_return += weight * asset_return
+        return portfolio_return
+
+    def optimize_sharpe_ratio(self, selected_stocks):
+        """
+        Optimize the portfolio to maximize the Sharpe ratio.
+        """
+        def neg_sharpe_ratio(weights):
+            # Obtener los retornos de los activos
+            asset_returns = self.get_asset_returns(selected_stocks)
+            portfolio_return = np.dot(weights, asset_returns.mean())
+            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(asset_returns.cov(), weights)))
+            sharpe_ratio = portfolio_return / portfolio_volatility
+            return -sharpe_ratio  # Negativo porque minimizamos
+    
+        # Optimización
+        num_assets = len(selected_stocks)
+        start_weights = np.ones(num_assets) / num_assets
+        bounds = [(0, 1) for _ in range(num_assets)]
+        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
+        
+        result = sco.minimize(neg_sharpe_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        return result.x if result.success else None
+    
+    
+    def optimize_omega_ratio(self, selected_stocks):
+        """
+        Optimize the portfolio to maximize the Omega ratio.
+        """
+        def neg_omega_ratio(weights):
+            # Obtener los retornos de los activos
+            asset_returns = self.get_asset_returns(selected_stocks)
+            portfolio_returns = np.dot(weights, asset_returns.T)
+            
+            # Umbral: aquí usamos 0 como ejemplo
+            threshold = 0
+            gains = portfolio_returns[portfolio_returns > threshold].sum()
+            losses = -portfolio_returns[portfolio_returns < threshold].sum()
+            omega_ratio = gains / losses if losses > 0 else float('inf')
+            
+            return -omega_ratio
+    
+        # Optimización
+        num_assets = len(selected_stocks)
+        start_weights = np.ones(num_assets) / num_assets
+        bounds = [(0, 1) for _ in range(num_assets)]
+        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
+        
+        result = sco.minimize(neg_omega_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        return result.x if result.success else None
+    
+    def optimize_sortino_ratio(self, selected_stocks):
+        """
+        Optimize the portfolio to maximize the Sortino ratio.
+        """
+        def neg_sortino_ratio(weights):
+            # Obtener los retornos de los activos
+            asset_returns = self.get_asset_returns(selected_stocks)
+            portfolio_return = np.dot(weights, asset_returns.mean())
+            
+            # Solo considerar retornos negativos
+            downside_risk = np.sqrt(np.mean(np.square(np.minimum(np.dot(weights, asset_returns.T), 0))))
+            sortino_ratio = portfolio_return / downside_risk if downside_risk > 0 else float('inf')
+            
+            return -sortino_ratio
+    
+        # Optimización
+        num_assets = len(selected_stocks)
+        start_weights = np.ones(num_assets) / num_assets
+        bounds = [(0, 1) for _ in range(num_assets)]
+        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
+        
+        result = sco.minimize(neg_sortino_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        return result.x if result.success else None
+    
+    def optimize_cvar(self, selected_stocks, alpha=0.05):
+        """
+        Optimize the portfolio to minimize Conditional Value at Risk (CVaR).
+        """
+        def cvar(weights):
+            # Obtener los retornos de los activos
+            asset_returns = self.get_asset_returns(selected_stocks)
+            portfolio_returns = np.dot(weights, asset_returns.T)
+            
+            # Calcular VaR y CVaR
+            VaR = np.percentile(portfolio_returns, alpha * 100)
+            CVaR = portfolio_returns[portfolio_returns <= VaR].mean()
+            
+            return -CVaR  # Minimizar CVaR
+    
+        # Optimización
+        num_assets = len(selected_stocks)
+        start_weights = np.ones(num_assets) / num_assets
+        bounds = [(0, 1) for _ in range(num_assets)]
+        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
+        
+        result = sco.minimize(cvar, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        return result.x if result.success else None
+
+    def plot_portfolio_evolution(self, portfolio_history):
+        """
+        Plot the evolution of portfolio values over time for different strategies.
+        
+        Parameters:
+        - portfolio_history (pd.DataFrame): DataFrame containing the portfolio values over time.
+        """
+        plt.figure(figsize=(10, 6))
+        for strategy in ["CVaR", "Sharpe", "Sortino", "Equal Weight"]:
+            plt.plot(portfolio_history['Date'], portfolio_history[strategy], label=strategy)
+
+        plt.title("Portfolio Evolution Over Time")
+        plt.xlabel("Date")
+        plt.ylabel("Portfolio Value")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
 
 
 
