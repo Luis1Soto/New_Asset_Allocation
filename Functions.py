@@ -16,6 +16,14 @@ class LoadData:
         """
         Process all Excel files in the given folder and extract financial ratios.
         """
+        from datetime import datetime
+    
+        def convert_to_date_format(date_str):
+            """
+            Convierte una fecha en formato 'MMM 'YY' a 'YYYY-MM'.
+            """
+            return datetime.strptime(date_str, "%b '%y").strftime("%Y-%m")
+    
         for file_name in os.listdir(self.folder_path):
             if file_name.endswith('.xlsx'):  
                 file_path = os.path.join(self.folder_path, file_name)
@@ -23,11 +31,12 @@ class LoadData:
                 first_sheet_df = excel_data.parse(excel_data.sheet_names[0])
                 ticker = first_sheet_df.iloc[4, 0].split()[0]
                 dates = first_sheet_df.iloc[6, :].values
+                dates = [convert_to_date_format(date) if isinstance(date, str) and "'" in date else date for date in dates]
                 financial_data = first_sheet_df.iloc[10:, :].reset_index(drop=True)
                 financial_data.columns = dates
                 financial_data.rename(columns={financial_data.columns[0]: 'Financial Ratio'}, inplace=True)
                 self.financial_dataframes[ticker] = financial_data
-
+    
         print(f"Data processed for the following tickers: {', '.join(self.financial_dataframes.keys())}")
 
     def get_financial_dataframes(self):
@@ -60,6 +69,9 @@ class LoadData:
         return closing_prices, self.financial_dataframes
 
 
+import pandas as pd
+from sklearn.preprocessing import MinMaxScaler
+
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
         """
@@ -79,6 +91,13 @@ class TestStrategy:
         self.protective = protective
         self.momentum_data = pd.DataFrame()  # Store momentum values for each decision date
 
+        # Define the financial ratios and their weights
+        self.ratios = ['Return on Common Equity', 'Operating Margin', 'Current Ratio (x)', 
+                       'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share']
+        self.weights = {'Return on Common Equity': 0.30, 'Operating Margin': 0.20, 
+                        'Current Ratio (x)': 0.15, 'Total Debt/Equity (%)': 0.15, 
+                        'Price/Earnings': 0.10, 'Cash Flow per Share': 0.10}
+
     def calculate_monthly_returns(self, price_series):
         """
         Calculate the monthly returns for a given price series.
@@ -89,7 +108,7 @@ class TestStrategy:
         Returns:
         pd.Series: A time series of monthly returns.
         """
-        return price_series.resample('M').last().pct_change()
+        return price_series.resample('ME').last().pct_change()
 
     def get_momentum(self, window=12, end_date=None):
         """
@@ -107,7 +126,7 @@ class TestStrategy:
         for ticker in self.protective:
             if ticker in self.prices:
                 # Calculate monthly returns
-                price_data = self.prices[ticker].resample('M').last()
+                price_data = self.prices[ticker].resample('ME').last()
                 returns = price_data.pct_change()
                 
                 # Filter the data up to the specified end_date
@@ -142,13 +161,89 @@ class TestStrategy:
 
         # Store momentum for reference
         momentum_data['Average'] = avg_momentum
-        self.momentum_data = self.momentum_data = pd.concat([self.momentum_data, pd.DataFrame(momentum_data, index=[date])])
+        self.momentum_data = pd.concat([self.momentum_data, pd.DataFrame(momentum_data, index=[date])])
 
         if avg_momentum > 0:
             return "Offensive"
         else:
             return "Defensive"
 
+    def select_top_stocks(self, universe, decision_date):
+        """
+        Selecciona las mejores acciones basadas en los ratios financieros más recientes en la fecha de decisión.
+        
+        Parameters:
+        - universe (list): Lista de tickers en el universo seleccionado (Offensive o Defensive).
+        - decision_date (str o pd.Timestamp): Fecha de la decisión del universo.
+        
+        Returns:
+        list: Las mejores 8 acciones si el universo es Offensive, o todas las acciones si es Defensive.
+        """
+        # Asegúrate de que la fecha de decisión esté en formato datetime
+        decision_date = pd.to_datetime(decision_date)
+    
+        if universe == "Offensive":
+            df = pd.DataFrame()
+    
+            for ticker in self.offensive:
+                if ticker in self.financials:
+                    # Extraer los datos financieros del ticker
+                    financial_data = self.financials[ticker]
+                    
+                    # Convertir las fechas de las columnas al formato datetime
+                    report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
+                    
+                    # Crear un mapeo de datetime a nombres originales de columnas
+                    date_mapping = dict(zip(report_dates, financial_data.columns))
+                    
+                    # Filtrar las fechas válidas y seleccionar la más reciente antes de la fecha de decisión
+                    valid_dates = [dt for dt in report_dates if dt <= decision_date and not pd.isnull(dt)]
+                    
+                    if valid_dates:
+                        # Seleccionar la fecha más reciente
+                        most_recent_date = max(valid_dates)
+                        most_recent_column = date_mapping[most_recent_date]
+                        most_recent_data = financial_data[['Financial Ratio', most_recent_column]]
+                        
+                        # Extraer los ratios financieros relevantes
+                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
+                        ratios_data.name = ticker
+                        df = pd.concat([df, pd.DataFrame([ratios_data])])
+                    else:
+                        print(f"No se encontraron datos financieros recientes para {ticker}")
+                else:
+                    print(f"No se encontraron datos financieros para {ticker}")
+            
+            if not df.empty:
+                # Convertir datos a numéricos y manejar valores faltantes
+                df = df.apply(pd.to_numeric, errors='coerce')
+                df = df.dropna()
+                
+                if df.empty:
+                    print("No hay datos suficientes después de limpiar los datos.")
+                    return []
+                
+                # Normalizar los ratios financieros
+                scaler = MinMaxScaler()
+                normalized_ratios = pd.DataFrame(scaler.fit_transform(df), columns=self.ratios, index=df.index)
+    
+                # Calcular la puntuación ponderada
+                df['Puntuacion_Total'] = 0
+                for ratio in self.ratios:
+                    df['Puntuacion_Total'] += normalized_ratios[ratio] * self.weights[ratio]
+    
+                # Seleccionar las 8 mejores acciones
+                top_8 = df.nlargest(8, 'Puntuacion_Total').index.tolist()
+                return top_8
+            else:
+                print("No hay datos suficientes para seleccionar acciones.")
+                return []
+    
+        elif universe == "Defensive":
+            # Devuelve todas las acciones si el universo es Defensive
+            return self.defensive
+    
+        
     def run_strategy(self, start_date, end_date=None):
         """
         Run the strategy, making universe decisions every 6 months, starting from a year after start_date.
@@ -158,7 +253,7 @@ class TestStrategy:
         - end_date (str or pd.Timestamp): The end date of the strategy. If None, use the most recent date in the data.
         
         Returns:
-        pd.DataFrame: A DataFrame with the date and the chosen universe for each 6-month period.
+        pd.DataFrame: A DataFrame with the date, chosen universe, and selected stocks for each 6-month period.
         """
         # Convert start_date and end_date to Timestamps
         start_date = pd.to_datetime(start_date)
@@ -173,9 +268,12 @@ class TestStrategy:
         while decision_date <= end_date:
             # Make a decision at the current decision_date
             chosen_universe = self.decide_universe(decision_date)
+            selected_stocks = self.select_top_stocks(chosen_universe, decision_date)
+
             results.append({
                 'Date': decision_date,
-                'Chosen Universe': chosen_universe
+                'Chosen Universe': chosen_universe,
+                'Selected Stocks': selected_stocks
             })
 
             # Move forward 6 months for the next decision
@@ -193,21 +291,6 @@ class TestStrategy:
         """
         return self.momentum_data
 
-# Example usage:
-# loader = LoadData(r'C:\path\to\folder')
-# loader.process_excel_files()
-# prices = loader.download_daily_closing_prices(start_date='2020-01-01')
-# financials = loader.get_financial_dataframes()
-
-# offensive_tickers = ['AAPL', 'MSFT', 'GOOGL']
-# defensive_tickers = ['JNJ', 'PG', 'KO']
-# protective_tickers = ['TLT', 'GLD', 'VIX']
-
-# strategy = TestStrategy(prices, financials, offensive_tickers, defensive_tickers, protective_tickers)
-# strategy_results = strategy.run_strategy(start_date='2020-01-01')
-# momentum_df = strategy.get_momentum_dataframe()
-# print(strategy_results)
-# print(momentum_df)
 
 
 
