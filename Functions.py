@@ -17,7 +17,7 @@ class LoadData:
         self.process_excel_files()
         self.get_financial_dataframes()
 
-    def harmonic_mean(values):
+    def harmonic_mean(self,values):
         values = np.array(values, dtype=float)
         non_zero_values = values[values != 0]  # Excluir los ceros
         if len(non_zero_values) == 0:
