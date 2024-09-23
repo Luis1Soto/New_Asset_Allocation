@@ -16,13 +16,6 @@ class LoadData:
         self.financial_dataframes = {}
         self.process_excel_files()
         self.get_financial_dataframes()
-
-    def harmonic_mean(self,values):
-        values = np.array(values, dtype=float)
-        non_zero_values = values[values != 0]  # Excluir los ceros
-        if len(non_zero_values) == 0:
-            return np.nan  # Devolver NaN si todos los valores son cero
-        return len(non_zero_values) / np.sum(1.0 / non_zero_values)
         
     def process_excel_files(self):
         """
@@ -47,7 +40,6 @@ class LoadData:
                 financial_data = first_sheet_df.iloc[10:, :].reset_index(drop=True)
                 financial_data.columns = dates
                 financial_data.rename(columns={financial_data.columns[0]: 'Financial Ratio'}, inplace=True)
-                financial_data['Harmonic Mean'] = financial_data.iloc[:, 1:].apply(self.harmonic_mean, axis=1)
                 self.financial_dataframes[ticker] = financial_data
     
         print(f"Data processed for the following tickers: {', '.join(self.financial_dataframes.keys())}")
@@ -629,7 +621,12 @@ class Backtesting:
         plt.grid(True)
         plt.show()
 
-
+def harmonic_mean(values):
+    values = np.array(values, dtype=float)
+    non_zero_values = values[values != 0]  # Excluir los ceros
+    if len(non_zero_values) == 0:
+        return np.nan  # Devolver NaN si todos los valores son cero
+    return len(non_zero_values) / np.sum(1.0 / non_zero_values)
     
 
 
