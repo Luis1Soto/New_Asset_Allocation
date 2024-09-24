@@ -95,10 +95,33 @@ class TestStrategy:
 
         # Define the financial ratios and their weights
         self.ratios = ['Return on Common Equity', 'Operating Margin', 'Current Ratio (x)', 
-                       'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share']
-        self.weights = {'Return on Common Equity': 0.30, 'Operating Margin': 0.20, 
-                        'Current Ratio (x)': 0.15, 'Total Debt/Equity (%)': 0.15, 
-                        'Price/Earnings': 0.10, 'Cash Flow per Share': 0.10}
+                       'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share','Total Shares Outstanding  (M)']
+     
+    def calculate_harmonic_mean(self, ratios):
+        return len(ratios) / np.sum(1.0 / ratios)
+
+    def calculate_piotroski_score(self, row):
+        score = 0
+        if row['Return on Common Equity'] > 0:
+            score += 1
+        if row['Return on Common Equity'] > row['Return on Common Equity_previous'].shift():
+            score += 1
+        if row['Operating Margin'] > 0:
+            score += 1
+        if row['Operating Margin'] > row['Operating Margin'].shift():
+            score += 1
+        if row['Cash Flow per Share'] > 0:
+            score += 1
+        if row['Current Ratio (x)'] > row['Current Ratio (x)'].shift():
+            score += 1
+        if row['Total Debt/Equity (%)'] < row['Total Debt/Equity (%)'].shift():
+            score += 1
+        if row['Total Shares Outstanding  (M)'] <= row['Total Shares Outstanding  (M)'].shift():
+            score += 1
+        if row['Price/Earnings'] < 15:
+            score += 2
+        return score
+        
 
     def calculate_monthly_returns(self, price_series):
         """
@@ -110,7 +133,7 @@ class TestStrategy:
         Returns:
         pd.Series: A time series of monthly returns.
         """
-        return price_series.resample('ME').last().pct_change()
+        return price_series.resample('M').last().pct_change()
 
     def get_momentum(self, window=12, end_date=None):
         """
@@ -127,7 +150,7 @@ class TestStrategy:
 
         for ticker in self.protective:
             if ticker in self.prices:
-                price_data = self.prices[ticker].resample('ME').last()
+                price_data = self.prices[ticker].resample('M').last()
                 returns = price_data.pct_change()
                 
                 if end_date:
@@ -167,7 +190,7 @@ class TestStrategy:
 
     def select_top_stocks(self, universe, decision_date):
         """
-        Selecciona las mejores acciones basadas en los ratios financieros más recientes en la fecha de decisión.
+        Selecciona las mejores acciones basadas en el Piotroski Score más reciente en la fecha de decisión.
         
         Parameters:
         - universe (list): Lista de tickers en el universo seleccionado (Offensive o Defensive).
@@ -179,56 +202,90 @@ class TestStrategy:
         decision_date = pd.to_datetime(decision_date)
     
         if universe == "Offensive":
-            df = pd.DataFrame()
-    
+            scores = {}
+
             for ticker in self.offensive:
                 if ticker in self.financials:
-                    
                     financial_data = self.financials[ticker]
-                    
                     report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
-                    
-                    date_mapping = dict(zip(report_dates, financial_data.columns))
-                    
-                    valid_dates = [dt for dt in report_dates if dt <= decision_date and not pd.isnull(dt)]
-                    
-                    if valid_dates:
+                    valid_dates = report_dates[report_dates <= decision_date]
+
+                    if valid_dates.size > 0:
                         most_recent_date = max(valid_dates)
-                        most_recent_column = date_mapping[most_recent_date]
-                        most_recent_data = financial_data[['Financial Ratio', most_recent_column]]
+                        most_recent_data = financial_data[['Financial Ratio', most_recent_date]]
                         
-                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
-                        ratios_data.name = ticker
-                        df = pd.concat([df, pd.DataFrame([ratios_data])])
-                    else:
-                        print(f"No se encontraron datos financieros recientes para {ticker}")
-                else:
-                    print(f"No se encontraron datos financieros para {ticker}")
+                        # Extraer los ratios relevantes
+                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_date]
+                        
+                        # Calcular el puntaje de Piotroski
+                        piotroski_score = self.calculate_piotroski_score(ratios_data)
+                        scores[ticker] = piotroski_score
             
-            if not df.empty:
-                df = df.apply(pd.to_numeric, errors='coerce')
-                df = df.dropna()
-                
-                if df.empty:
-                    print("No hay datos suficientes después de limpiar los datos.")
-                    return []
-                
-                scaler = MinMaxScaler()
-                normalized_ratios = pd.DataFrame(scaler.fit_transform(df), columns=self.ratios, index=df.index)
-    
-                df['Puntuacion_Total'] = 0
-                for ratio in self.ratios:
-                    df['Puntuacion_Total'] += normalized_ratios[ratio] * self.weights[ratio]
-    
-                # Seleccionar las 8 mejores acciones
-                top_8 = df.nlargest(8, 'Puntuacion_Total').index.tolist()
-                return top_8
-            else:
-                print("No hay datos suficientes para seleccionar acciones.")
-                return []
-    
+            # Seleccionar las 8 mejores acciones por puntaje
+            top_8 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:8]
+            return [ticker for ticker, _ in top_8]
         elif universe == "Defensive":
             return self.defensive
+            
+    def select_top_stocks2(self, universe, decision_date):
+        """
+        Select the best stocks based on Piotroski scores calculated from the harmonic mean of financial ratios.
+        
+        Parameters:
+        - universe (list): List of tickers in the selected universe (Offensive or Defensive).
+        - decision_date (str or pd.Timestamp): Date of the universe decision.
+        
+        Returns:
+        list: The top 8 stocks if the universe is Offensive, or all stocks if Defensive.
+        """
+        decision_date = pd.to_datetime(decision_date)
+        df = pd.DataFrame()
+
+        for ticker in universe:
+            if ticker in self.financials:
+                financial_data = self.financials[ticker]
+                report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
+                
+                # Filter valid dates
+                valid_dates = [dt for dt in report_dates if dt <= decision_date]
+                
+                if valid_dates:
+                    most_recent_date = max(valid_dates)
+                    ratios_data = financial_data[most_recent_date].loc[self.ratios]
+                    
+                    # Calculate harmonic mean for each ratio
+                    harmonic_mean_ratios = self.calculate_harmonic_mean(ratios_data)
+
+                    # Create a dictionary of ratios for Piotroski score calculation
+                    ratios_dict = {ratio: ratios_data[ratio] for ratio in self.ratios}
+
+                    # Add previous year ratios if available
+                    previous_date = most_recent_date - pd.DateOffset(years=1)
+                    if previous_date in report_dates:
+                        previous_ratios_data = financial_data[previous_date].loc[self.ratios]
+                        ratios_dict['Previous Return on Common Equity'] = previous_ratios_data['Return on Common Equity']
+                        ratios_dict['Previous Total Debt/Equity'] = previous_ratios_data['Total Debt/Equity (%)']
+                        ratios_dict['Previous Current Ratio'] = previous_ratios_data['Current Ratio (x)']
+                        ratios_dict['Previous Shares Outstanding'] = previous_ratios_data.get('Shares Outstanding', 0)
+                        ratios_dict['Previous Operating Margin'] = previous_ratios_data['Operating Margin']
+                        ratios_dict['Previous Asset Turnover'] = previous_ratios_data.get('Asset Turnover', 0)
+
+                    # Calculate the Piotroski score
+                    piotroski_score = self.calculate_piotroski_score(ratios_dict)
+
+                    # Append the score to the DataFrame
+                    df = df.append({'Ticker': ticker, 'Harmonic Mean': harmonic_mean_ratios, 'Piotroski Score': piotroski_score}, ignore_index=True)
+                else:
+                    print(f"No valid financial data found for {ticker} at {decision_date}")
+
+        # Select top 8 stocks based on Piotroski score
+        if not df.empty:
+            top_stocks = df.nlargest(8, 'Piotroski Score')['Ticker'].tolist()
+            return top_stocks
+        else:
+            print("No sufficient data to select stocks.")
+            return []
+
     
         
     def run_strategy(self, start_date, end_date=None):
