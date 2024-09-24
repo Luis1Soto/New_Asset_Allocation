@@ -104,19 +104,19 @@ class TestStrategy:
         score = 0
         if row['Return on Common Equity'] > 0:
             score += 1
-        if row['Return on Common Equity'] > row['Return on Common Equity_previous']:
+        if row['Return on Common Equity'] > row['Return on Common Equity_previous'].shift():
             score += 1
         if row['Operating Margin'] > 0:
             score += 1
-        if row['Operating Margin'] > row['Operating Margin_previous']:
+        if row['Operating Margin'] > row['Operating Margin'].shift():
             score += 1
         if row['Cash Flow per Share'] > 0:
             score += 1
-        if row['Current Ratio (x)'] > row['Current Ratio (x)_previous']:
+        if row['Current Ratio (x)'] > row['Current Ratio (x)'].shift():
             score += 1
-        if row['Total Debt/Equity (%)'] < row['Total Debt/Equity (%)_previous']:
+        if row['Total Debt/Equity (%)'] < row['Total Debt/Equity (%)'].shift():
             score += 1
-        if row['Shares Outstanding'] <= row['Shares Outstanding_previous']:
+        if row['Total Shares Outstanding  (M)'] <= row['Total Shares Outstanding  (M)'].shift():
             score += 1
         if row['Price/Earnings'] < 15:
             score += 2
