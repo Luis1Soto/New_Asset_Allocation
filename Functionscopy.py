@@ -74,6 +74,8 @@ class LoadData:
 
         return closing_prices, self.financial_dataframes
 
+
+
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
         """
@@ -95,8 +97,23 @@ class TestStrategy:
 
         # Define the financial ratios and their weights
         self.ratios = ['Return on Common Equity', 'Operating Margin', 'Current Ratio (x)', 
-                       'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share','Total Shares Outstanding  (M)']
-     
+                       'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share']
+        self.weights = {'Return on Common Equity': 0.30, 'Operating Margin': 0.20, 
+                        'Current Ratio (x)': 0.15, 'Total Debt/Equity (%)': 0.15, 
+                        'Price/Earnings': 0.10, 'Cash Flow per Share': 0.10}
+
+    def calculate_monthly_returns(self, price_series):
+        """
+        Calculate the monthly returns for a given price series.
+        
+        Parameters:
+        - price_series (pd.Series): A time series of stock prices.
+        
+        Returns:
+        pd.Series: A time series of monthly returns.
+        """
+        return price_series.resample('ME').last().pct_change()
+
     def calculate_harmonic_mean(self, ratios):
         return len(ratios) / np.sum(1.0 / ratios)
 
@@ -121,19 +138,7 @@ class TestStrategy:
         if row['Price/Earnings'] < 15:
             score += 2
         return score
-        
 
-    def calculate_monthly_returns(self, price_series):
-        """
-        Calculate the monthly returns for a given price series.
-        
-        Parameters:
-        - price_series (pd.Series): A time series of stock prices.
-        
-        Returns:
-        pd.Series: A time series of monthly returns.
-        """
-        return price_series.resample('M').last().pct_change()
 
     def get_momentum(self, window=12, end_date=None):
         """
@@ -150,7 +155,7 @@ class TestStrategy:
 
         for ticker in self.protective:
             if ticker in self.prices:
-                price_data = self.prices[ticker].resample('M').last()
+                price_data = self.prices[ticker].resample('ME').last()
                 returns = price_data.pct_change()
                 
                 if end_date:
@@ -190,7 +195,7 @@ class TestStrategy:
 
     def select_top_stocks(self, universe, decision_date):
         """
-        Selecciona las mejores acciones basadas en el Piotroski Score más reciente en la fecha de decisión.
+        Selecciona las mejores acciones basadas en los ratios financieros más recientes en la fecha de decisión.
         
         Parameters:
         - universe (list): Lista de tickers en el universo seleccionado (Offensive o Defensive).
@@ -202,31 +207,57 @@ class TestStrategy:
         decision_date = pd.to_datetime(decision_date)
     
         if universe == "Offensive":
-            scores = {}
-
+            df = pd.DataFrame()
+    
             for ticker in self.offensive:
                 if ticker in self.financials:
+                    
                     financial_data = self.financials[ticker]
+                    
                     report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
-                    valid_dates = report_dates[report_dates <= decision_date]
-
-                    if valid_dates.size > 0:
+                    
+                    date_mapping = dict(zip(report_dates, financial_data.columns))
+                    
+                    valid_dates = [dt for dt in report_dates if dt <= decision_date and not pd.isnull(dt)]
+                    
+                    if valid_dates:
                         most_recent_date = max(valid_dates)
-                        most_recent_data = financial_data[['Financial Ratio', most_recent_date]]
+                        most_recent_column = date_mapping[most_recent_date]
+                        most_recent_data = financial_data[['Financial Ratio', most_recent_column]]
                         
-                        # Extraer los ratios relevantes
-                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_date]
-                        
-                        # Calcular el puntaje de Piotroski
-                        piotroski_score = self.calculate_piotroski_score(ratios_data)
-                        scores[ticker] = piotroski_score
+                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
+                        ratios_data.name = ticker
+                        df = pd.concat([df, pd.DataFrame([ratios_data])])
+                    else:
+                        print(f"No se encontraron datos financieros recientes para {ticker}")
+                else:
+                    print(f"No se encontraron datos financieros para {ticker}")
             
-            # Seleccionar las 8 mejores acciones por puntaje
-            top_8 = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:8]
-            return [ticker for ticker, _ in top_8]
+            if not df.empty:
+                df = df.apply(pd.to_numeric, errors='coerce')
+                df = df.dropna()
+                
+                if df.empty:
+                    print("No hay datos suficientes después de limpiar los datos.")
+                    return []
+                
+                scaler = MinMaxScaler()
+                normalized_ratios = pd.DataFrame(scaler.fit_transform(df), columns=self.ratios, index=df.index)
+    
+                df['Puntuacion_Total'] = 0
+                for ratio in self.ratios:
+                    df['Puntuacion_Total'] += normalized_ratios[ratio] * self.weights[ratio]
+    
+                # Seleccionar las 8 mejores acciones
+                top_8 = df.nlargest(8, 'Puntuacion_Total').index.tolist()
+                return top_8
+            else:
+                print("No hay datos suficientes para seleccionar acciones.")
+                return []
+    
         elif universe == "Defensive":
             return self.defensive
-            
+
     def select_top_stocks2(self, universe, decision_date):
         """
         Select the best stocks based on Piotroski scores calculated from the harmonic mean of financial ratios.
@@ -383,13 +414,15 @@ class Backtesting:
             weights = np.ones(len(selected_stocks)) / len(selected_stocks)
 
         return dict(zip(selected_stocks, weights))
-        
+
+    
     def run_backtest(self):
         """
         Run the backtest for multiple portfolio optimization strategies (CVaR, Sharpe, Sortino, etc.)
         
         Returns:
-        pd.DataFrame: DataFrame containing the portfolio values over time for each strategy.
+        pd.DataFrame: DataFrame containing the portfolio values over time for each strategy,
+                      including the portfolio value and weights at each rebalance.
         """
         portfolio_values = {
             "CVaR": self.initial_capital,
@@ -398,17 +431,13 @@ class Backtesting:
             "Equal Weight": self.initial_capital
         }
     
-        # Historial del valor de los portafolios
         portfolio_history = []
+        rebalance_info = []  
     
-        # Ajustar las fechas del DataFrame results a 'YYYY-MM-01'
         self.results['Date'] = pd.to_datetime(self.results['Date'], format='%Y-%m').dt.to_period('M').dt.to_timestamp()
-    
-        # Obtener todas las fechas disponibles en los precios de cada ticker
         all_dates = np.unique(np.concatenate([self.prices[ticker].index.values for ticker in self.prices.keys()]))
         all_dates = sorted(pd.to_datetime(all_dates))
     
-        # Inicializar un diccionario para rastrear la cantidad de acciones compradas en cada estrategia
         holdings = {
             "CVaR": {},
             "Sharpe": {},
@@ -416,26 +445,41 @@ class Backtesting:
             "Equal Weight": {}
         }
     
-        # Iterar sobre las fechas de los resultados (fechas de rebalanceo)
         for i in range(len(self.results)):
             row = self.results.iloc[i]
             date = row['Date']
             selected_stocks = row['Selected Stocks']
             universe = row['Chosen Universe']
     
-            # Rebalancear cada estrategia de optimización
+            value_before_rebalance = {
+                "CVaR": portfolio_values["CVaR"],
+                "Sharpe": portfolio_values["Sharpe"],
+                "Sortino": portfolio_values["Sortino"],
+                "Equal Weight": portfolio_values["Equal Weight"]
+            }
+    
             weights_cvar = self.rebalance(date, selected_stocks, universe, method="cvar")
             weights_sharpe = self.rebalance(date, selected_stocks, universe, method="sharpe")
             weights_sortino = self.rebalance(date, selected_stocks, universe, method="sortino")
             weights_equal = self.rebalance(date, selected_stocks, universe, method="equal_weight")
     
-            # Comprar acciones en el día de rebalanceo para cada estrategia
+            rebalance_info.append({
+                "Date": date,
+                "Portfolio Value Before Rebalance (CVaR)": value_before_rebalance["CVaR"],
+                "Portfolio Value Before Rebalance (Sharpe)": value_before_rebalance["Sharpe"],
+                "Portfolio Value Before Rebalance (Sortino)": value_before_rebalance["Sortino"],
+                "Portfolio Value Before Rebalance (Equal Weight)": value_before_rebalance["Equal Weight"],
+                "Weights (CVaR)": weights_cvar,
+                "Weights (Sharpe)": weights_sharpe,
+                "Weights (Sortino)": weights_sortino,
+                "Weights (Equal Weight)": weights_equal
+            })
+    
             self.buy_stocks(holdings, "CVaR", weights_cvar, portfolio_values["CVaR"], date)
             self.buy_stocks(holdings, "Sharpe", weights_sharpe, portfolio_values["Sharpe"], date)
             self.buy_stocks(holdings, "Sortino", weights_sortino, portfolio_values["Sortino"], date)
             self.buy_stocks(holdings, "Equal Weight", weights_equal, portfolio_values["Equal Weight"], date)
     
-            # Desde la fecha de rebalanceo actual hasta la siguiente
             next_date = self.results.iloc[i + 1]['Date'] if i + 1 < len(self.results) else all_dates[-1]
             daily_dates = [d for d in all_dates if date <= d <= next_date]
     
@@ -445,7 +489,6 @@ class Backtesting:
                 portfolio_values["Sortino"] = self.calculate_portfolio_value(holdings["Sortino"], current_date)
                 portfolio_values["Equal Weight"] = self.calculate_portfolio_value(holdings["Equal Weight"], current_date)
     
-                # Registrar el valor de los portafolios en el historial
                 portfolio_history.append({
                     "Date": current_date,
                     "CVaR": portfolio_values["CVaR"],
@@ -454,7 +497,7 @@ class Backtesting:
                     "Equal Weight": portfolio_values["Equal Weight"]
                 })
     
-        return pd.DataFrame(portfolio_history)
+        return pd.DataFrame(portfolio_history), pd.DataFrame(rebalance_info)
     
     def buy_stocks(self, holdings, strategy, weights, portfolio_value, date):
         """
@@ -491,6 +534,7 @@ class Backtesting:
                 stock_price = self.prices[ticker].loc[current_date]
                 total_value += num_shares * stock_price
         return total_value
+
     
     def update_portfolio_value(self, portfolio_value, weights, current_date):
         """
@@ -600,7 +644,6 @@ class Backtesting:
         Optimize the portfolio to maximize the Omega ratio.
         """
         def neg_omega_ratio(weights):
-            # Obtener los retornos de los activos
             asset_returns = self.get_asset_returns(selected_stocks)
             portfolio_returns = np.dot(weights, asset_returns.T)
             
@@ -632,7 +675,6 @@ class Backtesting:
             
             return -sortino_ratio
     
-        # Optimización
         num_assets = len(selected_stocks)
         start_weights = np.ones(num_assets) / num_assets
         bounds = [(0, 1) for _ in range(num_assets)]
@@ -652,7 +694,7 @@ class Backtesting:
             VaR = np.percentile(portfolio_returns, alpha * 100)
             CVaR = portfolio_returns[portfolio_returns <= VaR].mean()
             
-            return -CVaR  # Minimizar CVaR
+            return -CVaR  
     
         num_assets = len(selected_stocks)
         start_weights = np.ones(num_assets) / num_assets
