@@ -5,7 +5,8 @@ from sklearn.preprocessing import MinMaxScaler
 import scipy.optimize as sco
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.stats import hmean
+import json
+from types import SimpleNamespace
 
 
 class LoadData:
@@ -75,7 +76,65 @@ class LoadData:
         return closing_prices, self.financial_dataframes
 
 
-
+#Class FinancialDataLoader:
+#    def __init__(self, file_path):
+#        """
+#        Inicializa la clase con la ruta del archivo JSON.
+#        
+#        Parameters:
+#        - file_path (str): La ruta del archivo JSON que contiene los datos financieros.
+#        """
+#        self.file_path = file_path
+#        self.data_dict = {}
+#        self.dataframe = None
+#
+#    def load_json(self):
+#        """
+#        Carga el contenido del archivo JSON y lo convierte en un objeto SimpleNamespace.
+#        """
+#        with open(self.file_path, "r") as file:
+#            content = file.read()
+#        self.data = json.loads(content, object_hook=lambda d: SimpleNamespace(**d))
+#
+#    def process_data(self):
+#        """
+#        Procesa los datos del archivo JSON para construir un DataFrame con los ratios financieros.
+#        """
+#        rowData = self.data.ksFinancialsTableFull.rowData
+#
+#        for i in range(90):
+#            row = getattr(rowData, f"row{i}")
+#            name = getattr(row, "col-0").value
+#            historical = list(map(lambda x: None if x == "@NA" else float(x),
+#                                  getattr(row, "col-1").value.split(",")))
+#            self.data_dict[name] = historical
+#
+#        columnData = self.data.ksFinancialsTableFull.columnData
+#        index = [getattr(columnData, f"col-{i}").value[0] for i in range(2, 27)]
+#
+#        # Crear el DataFrame
+#        self.dataframe = pd.DataFrame.from_dict(self.data_dict)
+#        self.dataframe["Date"] = index[::-1]  # Las fechas en orden inverso
+#        self.dataframe.set_index("Date", inplace=True)
+#
+#    def get_dataframe(self):
+#        """
+#        Retorna el DataFrame con los datos financieros.
+#        
+#        Returns:
+#        pd.DataFrame: El DataFrame que contiene los datos procesados.
+#        """
+#        return self.dataframe
+#
+#    def show_dataframe(self):
+#        """
+#        Muestra el DataFrame completo.
+#        """
+#        if self.dataframe is not None:
+#            print(self.dataframe)
+#        else:
+#            print("No hay datos para mostrar. Asegúrate de haber procesado los datos.")
+        
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
         """
@@ -94,12 +153,24 @@ class TestStrategy:
         self.defensive = defensive
         self.protective = protective
         self.momentum_data = pd.DataFrame()  # Store momentum values for each decision date
+
+        # Define the financial ratios and their weights
         self.ratios = ['Return on Common Equity', 'Operating Margin', 'Current Ratio (x)', 
                        'Total Debt/Equity (%)', 'Price/Earnings', 'Cash Flow per Share','Total Shares Outstanding  (M)']
-        
+
 
     def calculate_monthly_returns(self, price_series):
+        """
+        Calculate the monthly returns for a given price series.
+        
+        Parameters:
+        - price_series (pd.Series): A time series of stock prices.
+        
+        Returns:
+        pd.Series: A time series of monthly returns.
+        """
         return price_series.resample('ME').last().pct_change()
+
 
     def calculate_harmonic_mean(self, ratios):
         return len(ratios) / np.sum(1.0 / ratios)
@@ -108,25 +179,25 @@ class TestStrategy:
         score = 0
         if row['Return on Common Equity'] > 0:
             score += 1
-        if row['Return on Common Equity'] > row['Return on Common Equity'].shift():
+        if row['Return on Common Equity'] > np.roll(row['Return on Common Equity'], shift=1):
             score += 1
         if row['Operating Margin'] > 0:
             score += 1
-        if row['Operating Margin'] > row['Operating Margin'].shift():
+        if row['Operating Margin'] >  np.roll(row['Operating Margin'], shift=1):
             score += 1
         if row['Cash Flow per Share'] > 0:
             score += 1
-        if row['Current Ratio (x)'] > row['Current Ratio (x)'].shift():
+        if row['Current Ratio (x)'] > np.roll(row['Current Ratio (x)'], shift=1):
             score += 1
-        if row['Total Debt/Equity (%)'] < row['Total Debt/Equity (%)'].shift():
+        if row['Total Debt/Equity (%)'] < np.roll(row['Total Debt/Equity (%)'], shift=1):
             score += 1
-        if row['Total Shares Outstanding  (M)'] <= row['Total Shares Outstanding  (M)'].shift():
+        if row['Total Shares Outstanding  (M)'] <= np.roll(row['Total Shares Outstanding  (M)'], shift=1):
             score += 1
         if row['Price/Earnings'] < 15:
             score += 2
         return score
 
-
+   
     def get_momentum(self, window=12, end_date=None):
         """
         Calculate the momentum (SMA12) for tickers in the protective universe up to a given end date.
@@ -180,64 +251,66 @@ class TestStrategy:
         else:
             return "Defensive"
 
-    def select_top_stocks2(self, universe, decision_date):
+    def select_top_stocks(self, universe, decision_date):
         """
-        Select top stocks based on Piotroski score and Price/Earnings ratio.
+        Selecciona las mejores acciones basadas en los ratios financieros más recientes en la fecha de decisión.
         
         Parameters:
-        - universe (list): List of tickers in the selected universe.
-        - decision_date (str or pd.Timestamp): Date of the universe decision.
+        - universe (list): Lista de tickers en el universo seleccionado (Offensive o Defensive).
+        - decision_date (str o pd.Timestamp): Fecha de la decisión del universo.
         
         Returns:
-        list: Top 8 stocks selected.
+        list: Las mejores 8 acciones si el universo es Offensive, o todas las acciones si es Defensive.
         """
         decision_date = pd.to_datetime(decision_date)
-        df = pd.DataFrame()
+    
+        if universe == "Offensive":
+            df = pd.DataFrame()
+    
+            for ticker in self.offensive:
+                if ticker in self.financials:
+                    
+                    financial_data = self.financials[ticker]
+                    
+                    report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
+                    
+                    date_mapping = dict(zip(report_dates, financial_data.columns))
+                    
+                    valid_dates = [dt for dt in report_dates if dt <= decision_date and not pd.isnull(dt)]
+                    
+                    if valid_dates:
+                        most_recent_date = max(valid_dates)
+                        most_recent_column = date_mapping[most_recent_date]
+                        most_recent_data = financial_data[['Financial Ratio', most_recent_column]]
+                        
+                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
+                        ratios_data.name = ticker
+                        df = pd.concat([df, pd.DataFrame([ratios_data])])
+                    else:
+                        print(f"No se encontraron datos financieros recientes para {ticker}")
+                else:
+                    print(f"No se encontraron datos financieros para {ticker}")
+            
+            if not df.empty:
+                df = df.apply(pd.to_numeric, errors='coerce')
+                df = df.dropna()
+                
+                if df.empty:
+                    print("No hay datos suficientes después de limpiar los datos.")
+                    return []
 
-        for ticker in universe:
-            if ticker in self.financials:
-                financial_data = self.financials[ticker]
-                report_dates = pd.to_datetime(financial_data.columns, format='%Y-%m', errors='coerce')
-
-                # Filter valid dates prior to decision date
-                valid_dates = [dt for dt in report_dates if dt <= decision_date]
-
-                if valid_dates:
-                    ratios_data = {}
-
-                    # For each ratio, calculate harmonic mean from valid dates before the decision date
-                    for ratio in self.ratios:
-                        ratio_values = financial_data.loc[ratio, valid_dates].dropna().values
-                        harmonic_mean_value = self.calculate_harmonic_mean(ratio_values)
-                        ratios_data[ratio] = harmonic_mean_value
-
-                    # Collect previous year's data for Piotroski score
-                    previous_q = decision_date - pd.DateOffset(months=3)
-                    previous_valid_dates = [dt for dt in report_dates if dt <= previous_q]
-
-                    if previous_valid_dates:
-                        previous_ratios_data = {f'Previous {ratio}': financial_data.loc[ratio, previous_valid_dates].mean()
-                                                for ratio in self.ratios}
-                        ratios_data.update(previous_ratios_data)
-
-                        # Calculate Piotroski score
-                        piotroski_score = self.calculate_piotroski_score(ratios_data)
-
-                        # Append data including Piotroski score and PER to DataFrame
-                        df = df.append({'Ticker': ticker, 
-                                        'Piotroski Score': piotroski_score, 
-                                        'Price/Earnings': ratios_data['Price/Earnings']}, 
-                                       ignore_index=True)
-
-        # Sort by Piotroski score (descending) and then by PER (ascending for tie-breaking)
-        if not df.empty:
-            df = df.sort_values(by=['Piotroski Score', 'Price/Earnings'], ascending=[False, False])
-            top_stocks = df.head(8)['Ticker'].tolist()
-            return top_stocks
-        else:
-            print("No sufficient data to select stocks.")
-            return []
-
+                df['Harmonic_Mean'] = df.apply(lambda row: self.calculate_harmonic_mean(row) if all(row > 0) else 0, axis=1)
+                df['Piotroski_Score'] = df.apply(self.calculate_piotroski_score, axis=1)
+                print(df)
+                top_8 = df.nlargest(8, 'Piotroski_Score').index.tolist()
+                
+                return top_8
+            else:
+                print("No hay datos suficientes para seleccionar acciones.")
+                return []
+        
+        elif universe == "Defensive":
+            return self.defensive
     
         
     def run_strategy(self, start_date, end_date=None):
@@ -260,7 +333,7 @@ class TestStrategy:
 
         while decision_date <= end_date:
             chosen_universe = self.decide_universe(decision_date)
-            selected_stocks = self.select_top_stocks2(chosen_universe, decision_date)
+            selected_stocks = self.select_top_stocks(chosen_universe, decision_date)
 
             results.append({
                 'Date': decision_date,
@@ -281,8 +354,6 @@ class TestStrategy:
         pd.DataFrame: DataFrame containing the momentum of protective tickers over time.
         """
         return self.momentum_data
-
-
 
 class Backtesting:
     def __init__(self, results, prices, initial_capital):
@@ -642,3 +713,60 @@ class Backtesting:
         plt.legend()
         plt.grid(True)
         plt.show()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
