@@ -301,7 +301,6 @@ class TestStrategy:
 
                 df['Harmonic_Mean'] = df.apply(lambda row: self.calculate_harmonic_mean(row) if all(row > 0) else 0, axis=1)
                 df['Piotroski_Score'] = df.apply(self.calculate_piotroski_score, axis=1)
-                print(df)
                 top_8 = df.nlargest(8, 'Piotroski_Score').index.tolist()
                 
                 return top_8
