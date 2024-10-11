@@ -310,9 +310,11 @@ class DynamicBacktest:
         self.initial_capital = initial_capital
         self.portfolio_values_sortino = []  
         self.portfolio_values_sharpe = []  
+        self.portfolio_values_cvar = []  
         self.portfolio_values_benchmark = []
         self.weights_history_sortino = []  
         self.weights_history_sharpe = []  
+        self.weights_history_cvar = []  
         self.benchmark_data = self.download_benchmark_data(benchmark_ticker)
         self.benchmark_shares = None
         warnings.filterwarnings("ignore", category=RuntimeWarning, message="Values in x were outside bounds during a minimize step, clipping to bounds")
@@ -330,6 +332,31 @@ class DynamicBacktest:
         benchmark_series = benchmark_df['Adj Close']
         return benchmark_series
 
+    
+    def calculate_cvar_weights(self, selected_stocks, end_date, alpha=0.05):
+        start_date = end_date - pd.DateOffset(days=365)
+        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
+        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
+        if len(filtered_prices) == 0:
+            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
+        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
+        
+        def cvar_loss(weights):
+            portfolio_returns = np.dot(returns, weights)
+            sorted_returns = np.sort(portfolio_returns)
+            cvar = -np.mean(sorted_returns[:int(alpha * len(sorted_returns))])
+            return cvar
+        
+        n = len(returns.columns)
+        constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
+        bounds = tuple((0.05, 1) for asset in range(n))
+        initial_weights = n * [1. / n,]
+        optimized = sco.minimize(cvar_loss, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        opt_weights = optimized.x
+        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
+        return weights
+
+    
     def calculate_sortino_weights(self, selected_stocks, end_date):
         start_date = end_date - pd.DateOffset(days=365)
         filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
@@ -384,30 +411,36 @@ class DynamicBacktest:
         if universe_type == 'Offensive':
             weights_sortino = self.calculate_sortino_weights(selected_stocks, date)
             weights_sharpe = self.calculate_sharpe_weights(selected_stocks, date)
+            weights_cvar = self.calculate_cvar_weights(selected_stocks, date)
         else:
             weights_sortino = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
             weights_sharpe = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
+            weights_cvar = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
 
         prices_at_rebalance = {ticker: self.prices[ticker].asof(date) for ticker in selected_stocks}
         shares_sortino = {ticker: (capital * weights_sortino[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
         shares_sharpe = {ticker: (capital * weights_sharpe[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
+        shares_cvar = {ticker: (capital * weights_cvar[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
 
-        return shares_sortino, shares_sharpe, weights_sortino, weights_sharpe
+        return shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar
+
 
     def run_backtest(self):
         capital_sortino = self.initial_capital
         capital_sharpe = self.initial_capital
+        capital_cvar = self.initial_capital
         shares_sortino = {}
         shares_sharpe = {}
+        shares_cvar = {}
         rebalance_dates = pd.to_datetime(self.results['Date'].tolist())
 
-        # Obtener la primera fecha y rebalancear
         start_date = rebalance_dates[0]
         selected_stocks = self.results.iloc[0]['Selected Stocks']
         universe_type = self.results.iloc[0]['Chosen Universe']
-        shares_sortino, shares_sharpe, weights_sortino, weights_sharpe = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, start_date)
+        shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, start_date)
         self.weights_history_sortino.append((start_date, weights_sortino))
         self.weights_history_sharpe.append((start_date, weights_sharpe))
+        self.weights_history_cvar.append((start_date, weights_cvar))
 
         benchmark_initial_price = self.benchmark_data.asof(start_date)
         self.benchmark_shares = self.initial_capital / benchmark_initial_price
@@ -419,21 +452,26 @@ class DynamicBacktest:
                 idx = rebalance_dates.get_loc(current_date)
                 capital_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
                 capital_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
+                capital_cvar = self.calculate_portfolio_value(shares_cvar, selected_stocks, current_date)
                 selected_stocks = self.results.iloc[idx]['Selected Stocks']
                 universe_type = self.results.iloc[idx]['Chosen Universe']
-                shares_sortino, shares_sharpe, weights_sortino, weights_sharpe = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, current_date)
+                shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, current_date)
                 self.weights_history_sortino.append((current_date, weights_sortino))
                 self.weights_history_sharpe.append((current_date, weights_sharpe))
+                self.weights_history_cvar.append((current_date, weights_cvar))
 
             daily_value_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
             daily_value_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
+            daily_value_cvar = self.calculate_portfolio_value(shares_cvar, selected_stocks, current_date)
             
             daily_value_benchmark = self.benchmark_shares * self.benchmark_data.asof(current_date)
             
             self.portfolio_values_sortino.append((current_date, daily_value_sortino))
             self.portfolio_values_sharpe.append((current_date, daily_value_sharpe))
+            self.portfolio_values_cvar.append((current_date, daily_value_cvar))
             self.portfolio_values_benchmark.append((current_date, daily_value_benchmark))
 
+    
     def calculate_portfolio_value(self, shares, selected_stocks, date):
         portfolio_value = sum([shares[ticker] * self.prices[ticker].asof(date) for ticker in selected_stocks if ticker in shares])
         return portfolio_value
@@ -441,8 +479,9 @@ class DynamicBacktest:
     def get_portfolio_values(self):
         sortino_df = pd.DataFrame(self.portfolio_values_sortino, columns=['Date', 'Sortino Portfolio Value'])
         sharpe_df = pd.DataFrame(self.portfolio_values_sharpe, columns=['Date', 'Sharpe Portfolio Value'])
+        cvar_df = pd.DataFrame(self.portfolio_values_cvar, columns=['Date', 'CVaR Portfolio Value'])
         benchmark_df = pd.DataFrame(self.portfolio_values_benchmark, columns=['Date', 'benchmark Portfolio Value'])
-        return sortino_df.merge(sharpe_df, on='Date').merge(benchmark_df, on='Date')
+        return sortino_df.merge(sharpe_df, on='Date').merge(cvar_df, on='Date').merge(benchmark_df, on='Date')
 
     def get_weights_history(self):
         sortino_weights = pd.DataFrame(self.weights_history_sortino, columns=['Date', 'Sortino Weights'])
@@ -452,14 +491,15 @@ class DynamicBacktest:
     def plot_strategies(self):
         portfolio_values_df = self.get_portfolio_values()
         plt.figure(figsize=(14, 7))
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio', linestyle='-')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sharpe Portfolio Value'], label='Sharpe Portfolio', linestyle='-')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['benchmark Portfolio Value'], label='benchmark Portfolio', linestyle='-', color='red', linewidth=2)
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sharpe Portfolio Value'], label='Sharpe Portfolio')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['CVaR Portfolio Value'], label='CVaR Portfolio')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['benchmark Portfolio Value'], label='Benchmark Portfolio', color='red', linewidth=2)
         plt.title('Evolución de los Portafolios')
         plt.xlabel('Fecha')
         plt.ylabel('Valor del Portafolio')
         plt.legend()
-        plt.grid
+        plt.grid()
 
 
 
@@ -478,6 +518,7 @@ class DynamicBacktest:
         # Calcular los retornos de cada portafolio
         sortino_returns = returns_df['Sortino Portfolio Value']
         sharpe_returns = returns_df['Sharpe Portfolio Value']
+        cvar_returns = returns_df['CVaR Portfolio Value']
         benchmark_returns = returns_df['benchmark Portfolio Value']
 
         # Función para calcular CAGR
@@ -519,6 +560,7 @@ class DynamicBacktest:
         metrics = {}
         for name, returns, values in [('Sortino', sortino_returns, portfolio_values_df['Sortino Portfolio Value']),
                                       ('Sharpe', sharpe_returns, portfolio_values_df['Sharpe Portfolio Value']),
+                                      ('CVaR', cvar_returns, portfolio_values_df['CVaR Portfolio Value']),
                                       ('benchmark', benchmark_returns, portfolio_values_df['benchmark Portfolio Value'])]:
             # Métricas individuales
             metrics[name] = {
