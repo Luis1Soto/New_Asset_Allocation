@@ -6,6 +6,8 @@ import scipy.optimize as sco
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis
+import warnings
+
 
 class LoadData:
     def __init__(self, folder_path):
@@ -159,10 +161,10 @@ class TestStrategy:
                 if len(returns) >= window:
                     sma = returns.rolling(window=window).mean()
                     momentum[ticker] = sma.iloc[-1]
-                else:
-                    print(f"Not enough data to calculate momentum for {ticker}")
-            else:
-                print(f"No price data available for {ticker}")
+#                else:
+#                    print(f"Not enough data to calculate momentum for {ticker}")
+#            else:
+#                print(f"No price data available for {ticker}")
 
         return momentum
 
@@ -223,10 +225,10 @@ class TestStrategy:
                         ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
                         ratios_data.name = ticker
                         df = pd.concat([df, pd.DataFrame([ratios_data])])
-                    else:
-                        print(f"No se encontraron datos financieros recientes para {ticker}")
-                else:
-                    print(f"No se encontraron datos financieros para {ticker}")
+#                    else:
+#                        print(f"No se encontraron datos financieros recientes para {ticker}")
+#                else:
+#                    print(f"No se encontraron datos financieros para {ticker}")
             
             if not df.empty:
                 df = df.apply(pd.to_numeric, errors='coerce')
@@ -313,9 +315,9 @@ class DynamicBacktest:
         self.weights_history_sharpe = []  
         self.benchmark_data = self.download_benchmark_data(benchmark_ticker)
         self.benchmark_shares = None
-
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message="Values in x were outside bounds during a minimize step, clipping to bounds")
         self.run_backtest()
-
+        
     def download_benchmark_data(self, ticker):
         """
         Descarga los datos históricos del benchmark utilizando yfinance.
@@ -347,7 +349,7 @@ class DynamicBacktest:
 
         n = len(returns.columns)
         constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-        bounds = tuple((0, 1) for asset in range(n))
+        bounds = tuple((0.05, 1) for asset in range(n))
         initial_weights = n * [1. / n,]
         optimized = sco.minimize(sortino_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
         opt_weights = optimized.x
@@ -371,7 +373,7 @@ class DynamicBacktest:
 
         n = len(returns.columns)
         constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-        bounds = tuple((0, 1) for asset in range(n))
+        bounds = tuple((0.05, 1) for asset in range(n))
         initial_weights = n * [1. / n,]
         optimized = sco.minimize(sharpe_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
         opt_weights = optimized.x

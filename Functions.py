@@ -5,7 +5,7 @@ from sklearn.preprocessing import MinMaxScaler
 import scipy.optimize as sco
 import numpy as np
 import matplotlib.pyplot as plt
-
+from scipy.stats import kurtosis
 
 class LoadData:
     def __init__(self, folder_path):
@@ -64,12 +64,11 @@ class LoadData:
         closing_prices = {}
 
         for ticker in self.financial_dataframes.keys():
-            print(f"Downloading data for {ticker}...")
-            stock_data = yf.download(ticker, start=start_date, end=end_date)
+            stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if not stock_data.empty:
                 closing_prices[ticker] = stock_data['Close']
-            else:
-                print(f"No data found for {ticker}.")
+#            else:
+#                print(f"No data found for {ticker}.")
 
         return closing_prices, self.financial_dataframes
 
@@ -135,10 +134,10 @@ class TestStrategy:
                 if len(returns) >= window:
                     sma = returns.rolling(window=window).mean()
                     momentum[ticker] = sma.iloc[-1]
-                else:
-                    print(f"Not enough data to calculate momentum for {ticker}")
-            else:
-                print(f"No price data available for {ticker}")
+#                else:
+#                    print(f"Not enough data to calculate momentum for {ticker}")
+#            else:
+#                print(f"No price data available for {ticker}")
 
         return momentum
 
@@ -199,18 +198,18 @@ class TestStrategy:
                         ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
                         ratios_data.name = ticker
                         df = pd.concat([df, pd.DataFrame([ratios_data])])
-                    else:
-                        print(f"No se encontraron datos financieros recientes para {ticker}")
-                else:
-                    print(f"No se encontraron datos financieros para {ticker}")
+#                    else:
+#                        print(f"No se encontraron datos financieros recientes para {ticker}")
+#                else:
+#                    print(f"No se encontraron datos financieros para {ticker}")
             
             if not df.empty:
                 df = df.apply(pd.to_numeric, errors='coerce')
                 df = df.dropna()
                 
-                if df.empty:
-                    print("No hay datos suficientes después de limpiar los datos.")
-                    return []
+#                if df.empty:
+#                    print("No hay datos suficientes después de limpiar los datos.")
+#                    return []
                 
                 scaler = MinMaxScaler()
                 normalized_ratios = pd.DataFrame(scaler.fit_transform(df), columns=self.ratios, index=df.index)
@@ -272,418 +271,250 @@ class TestStrategy:
         """
         return self.momentum_data
 
-class Backtesting:
-    def __init__(self, results, prices, initial_capital):
+
+
+class DynamicBacktest:
+    def __init__(self, results, prices, initial_capital, benchmark_ticker='^GSPC'):
         """
-        Initialize the Backtesting object with strategy results, asset prices, and initial capital.
+        Inicializa la clase con los parámetros dados y descarga los datos del benchmark.
         
-        Parameters:
-        - results (pd.DataFrame): DataFrame containing the results of the strategy (run_strategy output).
-        - prices (dict): Dictionary of tickers with their corresponding price data.
-        - initial_capital (float): Initial capital for the portfolio.
+        Args:
+        - results: DataFrame con columnas ['Date', 'Chosen Universe', 'Selected Stocks']
+        - prices: Diccionario con tickers como claves y series de pandas con precios como valores.
+        - initial_capital: Capital inicial para el portafolio.
+        - benchmark_ticker: Ticker del benchmark para descargar (por defecto '^GSPC').
         """
         self.results = results
         self.prices = prices
         self.initial_capital = initial_capital
+        self.portfolio_values_sortino = []  
+        self.portfolio_values_sharpe = []  
+        self.portfolio_values_benchmark = []
+        self.weights_history_sortino = []  
+        self.weights_history_sharpe = []  
+        self.benchmark_data = self.download_benchmark_data(benchmark_ticker)
+        self.benchmark_shares = None
 
-    def rebalance(self, date, selected_stocks, universe_type, method="equal_weight"):
+        self.run_backtest()
+
+    def download_benchmark_data(self, ticker):
         """
-        Rebalance the portfolio on the given date based on the selected stocks and rebalancing method.
-        
-        Parameters:
-        - date (pd.Timestamp): The date of the rebalancing.
-        - selected_stocks (list): List of selected tickers for rebalancing.
-        - universe_type (str): Type of universe, either 'Defensive' or 'Offensive'.
-        - method (str): Method of asset allocation optimization (equal_weight, sharpe, omega, etc.)
-        
+        Descarga los datos históricos del benchmark utilizando yfinance.
+        Args:
+        - ticker: Ticker del benchmark (por defecto '^GSPC').
         Returns:
-        dict: Dictionary containing the weights assigned to each asset.
+        - Serie de tiempo de los precios de cierre ajustados del benchmark.
         """
-        if universe_type == "Defensive":
-            # Defensive universe: equal weight allocation
-            weights = np.ones(len(selected_stocks)) / len(selected_stocks)
-        
-        elif universe_type == "Offensive":
-            # Offensive universe: use optimization methods
-            if method == "equal_weight":
-                weights = np.ones(len(selected_stocks)) / len(selected_stocks)
-            elif method == "sharpe":
-                weights = self.optimize_sharpe_ratio(selected_stocks)
-            elif method == "omega":
-                weights = self.optimize_omega_ratio(selected_stocks)
-            elif method == "sortino":
-                weights = self.optimize_sortino_ratio(selected_stocks)
-            elif method == "cvar":
-                weights = self.optimize_cvar(selected_stocks)
-            else:
-                raise ValueError(f"Unknown optimization method: {method}")
-        
-        # Si la optimización falla o devuelve None, asignar pesos iguales
-        if weights is None or not np.any(weights):
-            weights = np.ones(len(selected_stocks)) / len(selected_stocks)
+        benchmark_df = yf.download(ticker, start=self.results['Date'].min(), end=self.results['Date'].max(), progress=False)
+        benchmark_series = benchmark_df['Adj Close']
+        return benchmark_series
 
-        return dict(zip(selected_stocks, weights))
+    def calculate_sortino_weights(self, selected_stocks, end_date):
+        start_date = end_date - pd.DateOffset(days=365)
+        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
+        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
+        if len(filtered_prices) == 0:
+            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
+        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
 
-    
+        def sortino_ratio(weights):
+            portfolio_return = np.sum(returns.mean() * weights) * 252
+            downside_returns = returns[returns < 0].fillna(0)
+            downside_std = np.sqrt(np.sum((downside_returns.mean() * weights) ** 2) * 252)
+            if downside_std == 0:
+                return np.inf
+            sortino = portfolio_return / downside_std
+            return -sortino
+
+        n = len(returns.columns)
+        constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
+        bounds = tuple((0, 1) for asset in range(n))
+        initial_weights = n * [1. / n,]
+        optimized = sco.minimize(sortino_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        opt_weights = optimized.x
+        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
+        return weights
+
+    def calculate_sharpe_weights(self, selected_stocks, end_date):
+        start_date = end_date - pd.DateOffset(days=365)
+        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
+        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
+        if len(filtered_prices) == 0:
+            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
+        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
+
+        def sharpe_ratio(weights):
+            portfolio_return = np.sum(returns.mean() * weights) * 252
+            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
+            if portfolio_volatility == 0:
+                return np.inf
+            return -(portfolio_return / portfolio_volatility)
+
+        n = len(returns.columns)
+        constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
+        bounds = tuple((0, 1) for asset in range(n))
+        initial_weights = n * [1. / n,]
+        optimized = sco.minimize(sharpe_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        opt_weights = optimized.x
+        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
+        return weights
+
+    def rebalance_portfolios(self, capital, selected_stocks, universe_type, date):
+        if universe_type == 'Offensive':
+            weights_sortino = self.calculate_sortino_weights(selected_stocks, date)
+            weights_sharpe = self.calculate_sharpe_weights(selected_stocks, date)
+        else:
+            weights_sortino = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
+            weights_sharpe = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
+
+        prices_at_rebalance = {ticker: self.prices[ticker].asof(date) for ticker in selected_stocks}
+        shares_sortino = {ticker: (capital * weights_sortino[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
+        shares_sharpe = {ticker: (capital * weights_sharpe[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
+
+        return shares_sortino, shares_sharpe, weights_sortino, weights_sharpe
+
     def run_backtest(self):
+        capital_sortino = self.initial_capital
+        capital_sharpe = self.initial_capital
+        shares_sortino = {}
+        shares_sharpe = {}
+        rebalance_dates = pd.to_datetime(self.results['Date'].tolist())
+
+        # Obtener la primera fecha y rebalancear
+        start_date = rebalance_dates[0]
+        selected_stocks = self.results.iloc[0]['Selected Stocks']
+        universe_type = self.results.iloc[0]['Chosen Universe']
+        shares_sortino, shares_sharpe, weights_sortino, weights_sharpe = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, start_date)
+        self.weights_history_sortino.append((start_date, weights_sortino))
+        self.weights_history_sharpe.append((start_date, weights_sharpe))
+
+        benchmark_initial_price = self.benchmark_data.asof(start_date)
+        self.benchmark_shares = self.initial_capital / benchmark_initial_price
+
+        all_dates = pd.date_range(start_date, self.prices[selected_stocks[0]].index[-1])
+
+        for current_date in all_dates:
+            if current_date in rebalance_dates:
+                idx = rebalance_dates.get_loc(current_date)
+                capital_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
+                capital_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
+                selected_stocks = self.results.iloc[idx]['Selected Stocks']
+                universe_type = self.results.iloc[idx]['Chosen Universe']
+                shares_sortino, shares_sharpe, weights_sortino, weights_sharpe = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, current_date)
+                self.weights_history_sortino.append((current_date, weights_sortino))
+                self.weights_history_sharpe.append((current_date, weights_sharpe))
+
+            daily_value_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
+            daily_value_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
+            
+            daily_value_benchmark = self.benchmark_shares * self.benchmark_data.asof(current_date)
+            
+            self.portfolio_values_sortino.append((current_date, daily_value_sortino))
+            self.portfolio_values_sharpe.append((current_date, daily_value_sharpe))
+            self.portfolio_values_benchmark.append((current_date, daily_value_benchmark))
+
+    def calculate_portfolio_value(self, shares, selected_stocks, date):
+        portfolio_value = sum([shares[ticker] * self.prices[ticker].asof(date) for ticker in selected_stocks if ticker in shares])
+        return portfolio_value
+
+    def get_portfolio_values(self):
+        sortino_df = pd.DataFrame(self.portfolio_values_sortino, columns=['Date', 'Sortino Portfolio Value'])
+        sharpe_df = pd.DataFrame(self.portfolio_values_sharpe, columns=['Date', 'Sharpe Portfolio Value'])
+        benchmark_df = pd.DataFrame(self.portfolio_values_benchmark, columns=['Date', 'benchmark Portfolio Value'])
+        return sortino_df.merge(sharpe_df, on='Date').merge(benchmark_df, on='Date')
+
+    def get_weights_history(self):
+        sortino_weights = pd.DataFrame(self.weights_history_sortino, columns=['Date', 'Sortino Weights'])
+        sharpe_weights = pd.DataFrame(self.weights_history_sharpe, columns=['Date', 'Sharpe Weights'])
+        return sortino_weights.merge(sharpe_weights, on='Date', how='outer')
+
+    def plot_strategies(self):
+        portfolio_values_df = self.get_portfolio_values()
+        plt.figure(figsize=(14, 7))
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio', linestyle='-')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sharpe Portfolio Value'], label='Sharpe Portfolio', linestyle='-')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['benchmark Portfolio Value'], label='benchmark Portfolio', linestyle='-', color='red', linewidth=2)
+        plt.title('Evolución de los Portafolios')
+        plt.xlabel('Fecha')
+        plt.ylabel('Valor del Portafolio')
+        plt.legend()
+        plt.grid
+
+
+
+    def evaluate_portfolios(self):
         """
-        Run the backtest for multiple portfolio optimization strategies (CVaR, Sharpe, Sortino, etc.)
+        Calcula y devuelve un DataFrame con las métricas de rendimiento para los portafolios disponibles (Sortino, Sharpe, benchmark).
         
         Returns:
-        pd.DataFrame: DataFrame containing the portfolio values over time for each strategy,
-                      including the portfolio value and weights at each rebalance.
+        - DataFrame con métricas de rendimiento: 'mean_return', 'CAGR', 'Sharpe Ratio', 'Sortino Ratio',
+          'Treynor Ratio', 'Volatility', 'VaR', 'Beta', 'Recovery Time', 'Tracking Error', 'Kurtosis', 'Max Drawdown'.
         """
-        portfolio_values = {
-            "CVaR": self.initial_capital,
-            "Sharpe": self.initial_capital,
-            "Sortino": self.initial_capital,
-            "Equal Weight": self.initial_capital
-        }
-    
-        portfolio_history = []
-        rebalance_info = []  
-    
-        self.results['Date'] = pd.to_datetime(self.results['Date'], format='%Y-%m').dt.to_period('M').dt.to_timestamp()
-        all_dates = np.unique(np.concatenate([self.prices[ticker].index.values for ticker in self.prices.keys()]))
-        all_dates = sorted(pd.to_datetime(all_dates))
-    
-        holdings = {
-            "CVaR": {},
-            "Sharpe": {},
-            "Sortino": {},
-            "Equal Weight": {}
-        }
-    
-        for i in range(len(self.results)):
-            row = self.results.iloc[i]
-            date = row['Date']
-            selected_stocks = row['Selected Stocks']
-            universe = row['Chosen Universe']
-    
-            value_before_rebalance = {
-                "CVaR": portfolio_values["CVaR"],
-                "Sharpe": portfolio_values["Sharpe"],
-                "Sortino": portfolio_values["Sortino"],
-                "Equal Weight": portfolio_values["Equal Weight"]
+        # Obtener los valores del portafolio y calcular retornos diarios
+        portfolio_values_df = self.get_portfolio_values()
+        returns_df = portfolio_values_df.set_index('Date').pct_change().dropna()
+
+        # Calcular los retornos de cada portafolio
+        sortino_returns = returns_df['Sortino Portfolio Value']
+        sharpe_returns = returns_df['Sharpe Portfolio Value']
+        benchmark_returns = returns_df['benchmark Portfolio Value']
+
+        # Función para calcular CAGR
+        def calculate_cagr(portfolio_values):
+            # Validar si la serie tiene suficientes datos
+            if len(portfolio_values) == 0:
+                return np.nan
+            # Acceder al primer y último valor usando .iloc
+            initial_value = portfolio_values.iloc[0]
+            final_value = portfolio_values.iloc[-1]
+            total_periods = len(portfolio_values)
+            years = total_periods / 252  # Asumiendo 252 días hábiles por año
+            cagr = (final_value / initial_value) ** (1 / years) - 1
+            return cagr
+
+        # Función para calcular máxima caída (Max Drawdown)
+        def max_drawdown(portfolio_values):
+            running_max = np.maximum.accumulate(portfolio_values)
+            drawdown = (portfolio_values - running_max) / running_max
+            return drawdown.min()
+
+        # Función para calcular tiempo de recuperación
+        def recovery_time(portfolio_values):
+            running_max = np.maximum.accumulate(portfolio_values)
+            drawdown = (portfolio_values - running_max) / running_max
+            drawdown_periods = np.where(drawdown < 0)[0]
+            if len(drawdown_periods) == 0:
+                return 0
+            recovery_periods = drawdown_periods[-1] - drawdown_periods[0]
+            return recovery_periods
+
+        # Función para calcular beta del portafolio
+        def calculate_beta(portfolio_returns, market_returns):
+            covariance = np.cov(portfolio_returns, market_returns)[0, 1]
+            market_variance = np.var(market_returns)
+            return covariance / market_variance
+
+        # Calcular métricas
+        metrics = {}
+        for name, returns, values in [('Sortino', sortino_returns, portfolio_values_df['Sortino Portfolio Value']),
+                                      ('Sharpe', sharpe_returns, portfolio_values_df['Sharpe Portfolio Value']),
+                                      ('benchmark', benchmark_returns, portfolio_values_df['benchmark Portfolio Value'])]:
+            # Métricas individuales
+            metrics[name] = {
+                'mean_return': returns.mean() * 252,
+                'CAGR': calculate_cagr(values),
+                'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252),
+                'Sortino Ratio': returns.mean() / returns[returns < 0].std() * np.sqrt(252),
+                'Treynor Ratio': returns.mean() / calculate_beta(returns, benchmark_returns),
+                'Volatility': returns.std() * np.sqrt(252),
+                'VaR': np.percentile(returns, 5),
+                'Beta': calculate_beta(returns, benchmark_returns),
+                'Recovery Time': recovery_time(values),
+                'Tracking Error': np.sqrt(np.mean((returns - benchmark_returns) ** 2)) * np.sqrt(252),
+                'Kurtosis': kurtosis(returns),
+                'Max Drawdown': max_drawdown(values),
+                'Alpha': returns.mean() * 252 - calculate_beta(returns, benchmark_returns) * benchmark_returns.mean() * 252
             }
-    
-            weights_cvar = self.rebalance(date, selected_stocks, universe, method="cvar")
-            weights_sharpe = self.rebalance(date, selected_stocks, universe, method="sharpe")
-            weights_sortino = self.rebalance(date, selected_stocks, universe, method="sortino")
-            weights_equal = self.rebalance(date, selected_stocks, universe, method="equal_weight")
-    
-            rebalance_info.append({
-                "Date": date,
-                "Portfolio Value Before Rebalance (CVaR)": value_before_rebalance["CVaR"],
-                "Portfolio Value Before Rebalance (Sharpe)": value_before_rebalance["Sharpe"],
-                "Portfolio Value Before Rebalance (Sortino)": value_before_rebalance["Sortino"],
-                "Portfolio Value Before Rebalance (Equal Weight)": value_before_rebalance["Equal Weight"],
-                "Weights (CVaR)": weights_cvar,
-                "Weights (Sharpe)": weights_sharpe,
-                "Weights (Sortino)": weights_sortino,
-                "Weights (Equal Weight)": weights_equal
-            })
-    
-            self.buy_stocks(holdings, "CVaR", weights_cvar, portfolio_values["CVaR"], date)
-            self.buy_stocks(holdings, "Sharpe", weights_sharpe, portfolio_values["Sharpe"], date)
-            self.buy_stocks(holdings, "Sortino", weights_sortino, portfolio_values["Sortino"], date)
-            self.buy_stocks(holdings, "Equal Weight", weights_equal, portfolio_values["Equal Weight"], date)
-    
-            next_date = self.results.iloc[i + 1]['Date'] if i + 1 < len(self.results) else all_dates[-1]
-            daily_dates = [d for d in all_dates if date <= d <= next_date]
-    
-            for current_date in daily_dates:
-                portfolio_values["CVaR"] = self.calculate_portfolio_value(holdings["CVaR"], current_date)
-                portfolio_values["Sharpe"] = self.calculate_portfolio_value(holdings["Sharpe"], current_date)
-                portfolio_values["Sortino"] = self.calculate_portfolio_value(holdings["Sortino"], current_date)
-                portfolio_values["Equal Weight"] = self.calculate_portfolio_value(holdings["Equal Weight"], current_date)
-    
-                portfolio_history.append({
-                    "Date": current_date,
-                    "CVaR": portfolio_values["CVaR"],
-                    "Sharpe": portfolio_values["Sharpe"],
-                    "Sortino": portfolio_values["Sortino"],
-                    "Equal Weight": portfolio_values["Equal Weight"]
-                })
-    
-        return pd.DataFrame(portfolio_history), pd.DataFrame(rebalance_info)
-    
-    def buy_stocks(self, holdings, strategy, weights, portfolio_value, date):
-        """
-        Comprar acciones en el día del rebalanceo en base a los pesos asignados.
-        
-        Parameters:
-        - holdings (dict): Diccionario que almacena la cantidad de acciones compradas por estrategia.
-        - strategy (str): El nombre de la estrategia (CVaR, Sharpe, Sortino, Equal Weight).
-        - weights (dict): Pesos asignados a cada activo.
-        - portfolio_value (float): Valor total del portafolio en la fecha del rebalanceo.
-        - date (pd.Timestamp): La fecha en la que se realiza el rebalanceo.
-        """
-        for ticker, weight in weights.items():
-            if ticker in self.prices and date in self.prices[ticker].index:
-                stock_price = self.prices[ticker].loc[date]
-                amount_to_invest = portfolio_value * weight
-                # Comprar la cantidad de acciones correspondiente
-                holdings[strategy][ticker] = amount_to_invest / stock_price
-    
-    def calculate_portfolio_value(self, holdings, current_date):
-        """
-        Calcular el valor total del portafolio basado en las acciones poseídas y los precios actuales.
-        
-        Parameters:
-        - holdings (dict): Cantidad de acciones poseídas de cada activo.
-        - current_date (pd.Timestamp): La fecha actual.
-        
-        Returns:
-        float: Valor actualizado del portafolio.
-        """
-        total_value = 0
-        for ticker, num_shares in holdings.items():
-            if ticker in self.prices and current_date in self.prices[ticker].index:
-                stock_price = self.prices[ticker].loc[current_date]
-                total_value += num_shares * stock_price
-        return total_value
 
-    
-    def update_portfolio_value(self, portfolio_value, weights, current_date):
-        """
-        Update the portfolio value based on the current asset prices.
-        
-        Parameters:
-        - portfolio_value (float): The current value of the portfolio.
-        - weights (dict): Dictionary of asset weights.
-        - current_date (pd.Timestamp): The date for which to update the portfolio value.
-        
-        Returns:
-        float: Updated portfolio value.
-        """
-        new_value = 0
-        for ticker, weight in weights.items():
-            if ticker in self.prices:
-                price_data = self.prices[ticker]
-                if current_date in price_data.index:
-                    current_price = price_data.loc[current_date]
-                    previous_price = price_data.loc[price_data.index[0]]  # Precio inicial de rebalanceo
-                    asset_return = current_price / previous_price - 1
-                    new_value += weight * (portfolio_value * (1 + asset_return))
-        return new_value
-
-    def plot_portfolio_evolution(self, portfolio_history):
-        """
-        Plot the evolution of portfolio values over time for different strategies.
-        
-        Parameters:
-        - portfolio_history (pd.DataFrame): DataFrame containing the portfolio values over time.
-        """
-        plt.figure(figsize=(10, 6))
-        for strategy in ["CVaR", "Sharpe", "Sortino", "Equal Weight"]:
-            plt.plot(portfolio_history['Date'], portfolio_history[strategy], label=strategy)
-
-        plt.title("Portfolio Evolution Over Time")
-        plt.xlabel("Date")
-        plt.ylabel("Portfolio Value")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
-    
-    def get_asset_returns(self, selected_stocks):
-        """
-        Retrieve historical returns for the selected stocks.
-        
-        Parameters:
-        - selected_stocks (list): List of selected tickers.
-        
-        Returns:
-        pd.DataFrame: A DataFrame containing historical returns for the selected assets.
-        """
-        asset_returns = pd.DataFrame()
-    
-        for ticker in selected_stocks:
-            if ticker in self.prices:
-                returns = self.prices[ticker].pct_change().dropna()
-                asset_returns[ticker] = returns
-        
-        return asset_returns
-
-    def get_portfolio_return(self, weights, date):
-        """
-        Calculate the portfolio return based on the weights and asset returns.
-        
-        Parameters:
-        - weights (dict): Dictionary of asset weights.
-        - date (pd.Timestamp): Date for which to calculate the returns.
-        
-        Returns:
-        float: Portfolio return since the last rebalancing.
-        """
-        portfolio_return = 0
-        for ticker, weight in weights.items():
-            if ticker in self.prices:
-                price_data = self.prices[ticker]
-                if date in price_data.index:
-                    previous_price = price_data.loc[date]
-                    current_price = price_data.iloc[-1]
-                    asset_return = (current_price / previous_price) - 1
-                    portfolio_return += weight * asset_return
-        return portfolio_return
-
-    def optimize_sharpe_ratio(self, selected_stocks):
-        """
-        Optimize the portfolio to maximize the Sharpe ratio.
-        """
-        def neg_sharpe_ratio(weights):
-            asset_returns = self.get_asset_returns(selected_stocks)
-            portfolio_return = np.dot(weights, asset_returns.mean())
-            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(asset_returns.cov(), weights)))
-            sharpe_ratio = portfolio_return / portfolio_volatility
-            return -sharpe_ratio  
-    
-        num_assets = len(selected_stocks)
-        start_weights = np.ones(num_assets) / num_assets
-        bounds = [(0, 1) for _ in range(num_assets)]
-        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-        
-        result = sco.minimize(neg_sharpe_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        return result.x if result.success else None
-    
-    
-    def optimize_omega_ratio(self, selected_stocks):
-        """
-        Optimize the portfolio to maximize the Omega ratio.
-        """
-        def neg_omega_ratio(weights):
-            asset_returns = self.get_asset_returns(selected_stocks)
-            portfolio_returns = np.dot(weights, asset_returns.T)
-            
-            threshold = 0
-            gains = portfolio_returns[portfolio_returns > threshold].sum()
-            losses = -portfolio_returns[portfolio_returns < threshold].sum()
-            omega_ratio = gains / losses if losses > 0 else float('inf')
-            
-            return -omega_ratio
-    
-        num_assets = len(selected_stocks)
-        start_weights = np.ones(num_assets) / num_assets
-        bounds = [(0, 1) for _ in range(num_assets)]
-        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-        
-        result = sco.minimize(neg_omega_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        return result.x if result.success else None
-    
-    def optimize_sortino_ratio(self, selected_stocks):
-        """
-        Optimize the portfolio to maximize the Sortino ratio.
-        """
-        def neg_sortino_ratio(weights):
-            asset_returns = self.get_asset_returns(selected_stocks)
-            portfolio_return = np.dot(weights, asset_returns.mean())
-            
-            downside_risk = np.sqrt(np.mean(np.square(np.minimum(np.dot(weights, asset_returns.T), 0))))
-            sortino_ratio = portfolio_return / downside_risk if downside_risk > 0 else float('inf')
-            
-            return -sortino_ratio
-    
-        num_assets = len(selected_stocks)
-        start_weights = np.ones(num_assets) / num_assets
-        bounds = [(0, 1) for _ in range(num_assets)]
-        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-        
-        result = sco.minimize(neg_sortino_ratio, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        return result.x if result.success else None
-    
-    def optimize_cvar(self, selected_stocks, alpha=0.05):
-        """
-        Optimize the portfolio to minimize Conditional Value at Risk (CVaR).
-        """
-        def cvar(weights):
-            asset_returns = self.get_asset_returns(selected_stocks)
-            portfolio_returns = np.dot(weights, asset_returns.T)
-            
-            VaR = np.percentile(portfolio_returns, alpha * 100)
-            CVaR = portfolio_returns[portfolio_returns <= VaR].mean()
-            
-            return -CVaR  
-    
-        num_assets = len(selected_stocks)
-        start_weights = np.ones(num_assets) / num_assets
-        bounds = [(0, 1) for _ in range(num_assets)]
-        constraints = {'type': 'eq', 'fun': lambda x: np.sum(x) - 1}
-        
-        result = sco.minimize(cvar, start_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        return result.x if result.success else None
-
-    def plot_portfolio_evolution(self, portfolio_history):
-        """
-        Plot the evolution of portfolio values over time for different strategies.
-        
-        Parameters:
-        - portfolio_history (pd.DataFrame): DataFrame containing the portfolio values over time.
-        """
-        plt.figure(figsize=(10, 6))
-        for strategy in ["CVaR", "Sharpe", "Sortino", "Equal Weight"]:
-            plt.plot(portfolio_history['Date'], portfolio_history[strategy], label=strategy)
-
-        plt.title("Portfolio Evolution Over Time")
-        plt.xlabel("Date")
-        plt.ylabel("Portfolio Value")
-        plt.legend()
-        plt.grid(True)
-        plt.show()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+        metrics_df = pd.DataFrame(metrics).T
+        return metrics_df
