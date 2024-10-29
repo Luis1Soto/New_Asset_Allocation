@@ -69,8 +69,6 @@ class LoadData:
             stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
             if not stock_data.empty:
                 closing_prices[ticker] = stock_data['Close']
-#            else:
-#                print(f"No data found for {ticker}.")
 
         return closing_prices, self.financial_dataframes
 
@@ -161,10 +159,6 @@ class TestStrategy:
                 if len(returns) >= window:
                     sma = returns.rolling(window=window).mean()
                     momentum[ticker] = sma.iloc[-1]
-#                else:
-#                    print(f"Not enough data to calculate momentum for {ticker}")
-#            else:
-#                print(f"No price data available for {ticker}")
 
         return momentum
 
@@ -225,10 +219,6 @@ class TestStrategy:
                         ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
                         ratios_data.name = ticker
                         df = pd.concat([df, pd.DataFrame([ratios_data])])
-#                    else:
-#                        print(f"No se encontraron datos financieros recientes para {ticker}")
-#                else:
-#                    print(f"No se encontraron datos financieros para {ticker}")
             
             if not df.empty:
                 df = df.apply(pd.to_numeric, errors='coerce')
@@ -281,7 +271,6 @@ class TestStrategy:
 
             decision_date += pd.DateOffset(months=6)
 
-        # Convert the results to a DataFrame
         return pd.DataFrame(results)
 
     def get_momentum_dataframe(self):
@@ -295,289 +284,219 @@ class TestStrategy:
 
 
 class DynamicBacktest:
-    def __init__(self, results, prices, initial_capital, benchmark_ticker='^GSPC'):
+    
+    def __init__(self, results, prices, initial_capital, benchmark_data=None, benchmark_ticker='^GSPC'):
         """
-        Inicializa la clase con los parámetros dados y descarga los datos del benchmark.
+        Inicializa la clase con los parámetros dados y descarga el benchmark solo si no se proporciona.
         
         Args:
         - results: DataFrame con columnas ['Date', 'Chosen Universe', 'Selected Stocks']
         - prices: Diccionario con tickers como claves y series de pandas con precios como valores.
         - initial_capital: Capital inicial para el portafolio.
-        - benchmark_ticker: Ticker del benchmark para descargar (por defecto '^GSPC').
+        - benchmark_data: Serie de tiempo opcional con los precios del benchmark.
+        - benchmark_ticker: Ticker del benchmark para descargar si no se proporciona data.
         """
         self.results = results
         self.prices = prices
         self.initial_capital = initial_capital
-        self.portfolio_values_sortino = []  
-        self.portfolio_values_sharpe = []  
-        self.portfolio_values_cvar = []  
+        self.portfolio_values_sortino = []
         self.portfolio_values_benchmark = []
-        self.weights_history_sortino = []  
-        self.weights_history_sharpe = []  
-        self.weights_history_cvar = []  
-        self.benchmark_data = self.download_benchmark_data(benchmark_ticker)
+        self.weights_history_sortino = []
+
+        self.benchmark_data = benchmark_data if benchmark_data is not None else self.download_benchmark_data(benchmark_ticker)
         self.benchmark_shares = None
-        warnings.filterwarnings("ignore", category=RuntimeWarning, message="Values in x were outside bounds during a minimize step, clipping to bounds")
+
+        warnings.filterwarnings("ignore", category=RuntimeWarning, 
+                                message="Values in x were outside bounds during a minimize step, clipping to bounds")
+
         self.run_backtest()
-        
+
     def download_benchmark_data(self, ticker):
         """
-        Descarga los datos históricos del benchmark utilizando yfinance.
-        Args:
-        - ticker: Ticker del benchmark (por defecto '^GSPC').
-        Returns:
-        - Serie de tiempo de los precios de cierre ajustados del benchmark.
+        Descarga los datos históricos del benchmark usando yfinance.
         """
         benchmark_df = yf.download(ticker, start=self.results['Date'].min(), end=self.results['Date'].max(), progress=False)
-        benchmark_series = benchmark_df['Adj Close']
-        return benchmark_series
+        return benchmark_df['Adj Close']
 
-    
-    def calculate_cvar_weights(self, selected_stocks, end_date, alpha=0.05):
-        start_date = end_date - pd.DateOffset(days=365)
-        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
-        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
-        if len(filtered_prices) == 0:
-            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
-        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
-        
-        def cvar_loss(weights):
-            portfolio_returns = np.dot(returns, weights)
-            sorted_returns = np.sort(portfolio_returns)
-            cvar = -np.mean(sorted_returns[:int(alpha * len(sorted_returns))])
-            return cvar
-        
-        n = len(returns.columns)
-        constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-        bounds = tuple((0.05, 1) for asset in range(n))
-        initial_weights = n * [1. / n,]
-        optimized = sco.minimize(cvar_loss, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        opt_weights = optimized.x
-        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
-        return weights
-
-    
     def calculate_sortino_weights(self, selected_stocks, end_date):
+        """
+        Calcula los pesos óptimos basados en el ratio Sortino.
+        """
         start_date = end_date - pd.DateOffset(days=365)
-        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
-        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
-        if len(filtered_prices) == 0:
-            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
-        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
+        returns = pd.DataFrame({
+            ticker: self.prices[ticker].loc[start_date:end_date].pct_change().dropna() 
+            for ticker in selected_stocks if ticker in self.prices
+        }).dropna(axis=1)
 
         def sortino_ratio(weights):
             portfolio_return = np.sum(returns.mean() * weights) * 252
-            downside_returns = returns[returns < 0].fillna(0)
-            downside_std = np.sqrt(np.sum((downside_returns.mean() * weights) ** 2) * 252)
-            if downside_std == 0:
-                return np.inf
-            sortino = portfolio_return / downside_std
-            return -sortino
+            downside_std = np.sqrt(np.sum((returns[returns < 0].fillna(0).mean() * weights) ** 2) * 252)
+            return -portfolio_return / downside_std if downside_std != 0 else np.inf
 
         n = len(returns.columns)
         constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-        bounds = tuple((0.05, 1) for asset in range(n))
+        bounds = tuple((0.05, 1) for _ in range(n))
         initial_weights = n * [1. / n,]
+
         optimized = sco.minimize(sortino_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        opt_weights = optimized.x
-        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
-        return weights
+        return {ticker: optimized.x[i] for i, ticker in enumerate(returns.columns)}
 
-    def calculate_sharpe_weights(self, selected_stocks, end_date):
+    def calculate_semivariance_weights(self, selected_stocks, end_date):
+        """
+        Calcula los pesos óptimos minimizando la semivarianza del portafolio.
+        """
         start_date = end_date - pd.DateOffset(days=365)
-        filtered_prices = {ticker: self.prices[ticker].loc[start_date:end_date].dropna() for ticker in selected_stocks}
-        filtered_prices = {ticker: prices for ticker, prices in filtered_prices.items() if len(prices) > 0}
-        if len(filtered_prices) == 0:
-            raise ValueError(f"No hay datos de precios disponibles en el rango {start_date} a {end_date} para los activos seleccionados.")
-        returns = pd.DataFrame({ticker: prices.pct_change().dropna() for ticker, prices in filtered_prices.items()})
-
-        def sharpe_ratio(weights):
-            portfolio_return = np.sum(returns.mean() * weights) * 252
-            portfolio_volatility = np.sqrt(np.dot(weights.T, np.dot(returns.cov() * 252, weights)))
-            if portfolio_volatility == 0:
-                return np.inf
-            return -(portfolio_return / portfolio_volatility)
-
+        returns = pd.DataFrame({
+            ticker: self.prices[ticker].loc[start_date:end_date].pct_change().dropna()
+            for ticker in selected_stocks if ticker in self.prices
+        }).dropna(axis=1)
+    
+        def semivariance_loss(weights):
+            portfolio_return = np.dot(returns, weights)
+            downside_returns = portfolio_return[portfolio_return < 0]
+            semivariance = np.mean(downside_returns ** 2)  # Semivarianza
+            return semivariance
+    
         n = len(returns.columns)
         constraints = ({'type': 'eq', 'fun': lambda weights: np.sum(weights) - 1})
-        bounds = tuple((0.05, 1) for asset in range(n))
+        bounds = tuple((0.05, 1) for _ in range(n))
         initial_weights = n * [1. / n,]
-        optimized = sco.minimize(sharpe_ratio, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
-        opt_weights = optimized.x
-        weights = {ticker: opt_weights[i] for i, ticker in enumerate(returns.columns)}
-        return weights
-
+    
+        optimized = sco.minimize(semivariance_loss, initial_weights, method='SLSQP', bounds=bounds, constraints=constraints)
+        return {ticker: optimized.x[i] for i, ticker in enumerate(returns.columns)}
+    
     def rebalance_portfolios(self, capital, selected_stocks, universe_type, date):
+        """
+        Realiza el rebalanceo utilizando Sortino para ofensivo y semivarianza para defensivo.
+        """
         if universe_type == 'Offensive':
-            weights_sortino = self.calculate_sortino_weights(selected_stocks, date)
-            weights_sharpe = self.calculate_sharpe_weights(selected_stocks, date)
-            weights_cvar = self.calculate_cvar_weights(selected_stocks, date)
+            weights = self.calculate_sortino_weights(selected_stocks, date)
         else:
-            weights_sortino = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
-            weights_sharpe = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
-            weights_cvar = {ticker: 1.0 / len(selected_stocks) for ticker in selected_stocks}
-
+            weights = self.calculate_semivariance_weights(selected_stocks, date)
+    
         prices_at_rebalance = {ticker: self.prices[ticker].asof(date) for ticker in selected_stocks}
-        shares_sortino = {ticker: (capital * weights_sortino[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
-        shares_sharpe = {ticker: (capital * weights_sharpe[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
-        shares_cvar = {ticker: (capital * weights_cvar[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
+        shares = {ticker: (capital * weights[ticker]) / prices_at_rebalance[ticker] for ticker in selected_stocks}
+        return shares, weights
 
-        return shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar
-
-
+    
     def run_backtest(self):
-        capital_sortino = self.initial_capital
-        capital_sharpe = self.initial_capital
-        capital_cvar = self.initial_capital
-        shares_sortino = {}
-        shares_sharpe = {}
-        shares_cvar = {}
+        """
+        Ejecuta el backtest, manejando portafolios y benchmark.
+        """
+        capital = self.initial_capital
         rebalance_dates = pd.to_datetime(self.results['Date'].tolist())
-
         start_date = rebalance_dates[0]
         selected_stocks = self.results.iloc[0]['Selected Stocks']
         universe_type = self.results.iloc[0]['Chosen Universe']
-        shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, start_date)
-        self.weights_history_sortino.append((start_date, weights_sortino))
-        self.weights_history_sharpe.append((start_date, weights_sharpe))
-        self.weights_history_cvar.append((start_date, weights_cvar))
 
+        shares, weights = self.rebalance_portfolios(capital, selected_stocks, universe_type, start_date)
+        self.weights_history_sortino.append((start_date, weights))
         benchmark_initial_price = self.benchmark_data.asof(start_date)
         self.benchmark_shares = self.initial_capital / benchmark_initial_price
 
-        all_dates = pd.date_range(start_date, self.prices[selected_stocks[0]].index[-1])
-
+        all_dates = pd.date_range(start_date, self.benchmark_data.index[-1])
         for current_date in all_dates:
             if current_date in rebalance_dates:
                 idx = rebalance_dates.get_loc(current_date)
-                capital_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
-                capital_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
-                capital_cvar = self.calculate_portfolio_value(shares_cvar, selected_stocks, current_date)
+                capital = self.calculate_portfolio_value(shares, selected_stocks, current_date)
                 selected_stocks = self.results.iloc[idx]['Selected Stocks']
                 universe_type = self.results.iloc[idx]['Chosen Universe']
-                shares_sortino, shares_sharpe, shares_cvar, weights_sortino, weights_sharpe, weights_cvar = self.rebalance_portfolios(capital_sortino, selected_stocks, universe_type, current_date)
-                self.weights_history_sortino.append((current_date, weights_sortino))
-                self.weights_history_sharpe.append((current_date, weights_sharpe))
-                self.weights_history_cvar.append((current_date, weights_cvar))
+                shares, weights = self.rebalance_portfolios(capital, selected_stocks, universe_type, current_date)
+                self.weights_history_sortino.append((current_date, weights))
 
-            daily_value_sortino = self.calculate_portfolio_value(shares_sortino, selected_stocks, current_date)
-            daily_value_sharpe = self.calculate_portfolio_value(shares_sharpe, selected_stocks, current_date)
-            daily_value_cvar = self.calculate_portfolio_value(shares_cvar, selected_stocks, current_date)
-            
+            daily_value = self.calculate_portfolio_value(shares, selected_stocks, current_date)
             daily_value_benchmark = self.benchmark_shares * self.benchmark_data.asof(current_date)
-            
-            self.portfolio_values_sortino.append((current_date, daily_value_sortino))
-            self.portfolio_values_sharpe.append((current_date, daily_value_sharpe))
-            self.portfolio_values_cvar.append((current_date, daily_value_cvar))
+
+            self.portfolio_values_sortino.append((current_date, daily_value))
             self.portfolio_values_benchmark.append((current_date, daily_value_benchmark))
 
     
     def calculate_portfolio_value(self, shares, selected_stocks, date):
-        portfolio_value = sum([shares[ticker] * self.prices[ticker].asof(date) for ticker in selected_stocks if ticker in shares])
-        return portfolio_value
+        """
+        Calcula el valor del portafolio para la fecha dada.
+        """
+        return sum(shares.get(ticker, 0) * self.prices[ticker].asof(date) for ticker in selected_stocks)
 
     def get_portfolio_values(self):
+        """
+        Devuelve un DataFrame con los valores del portafolio y del benchmark.
+        """
         sortino_df = pd.DataFrame(self.portfolio_values_sortino, columns=['Date', 'Sortino Portfolio Value'])
-        sharpe_df = pd.DataFrame(self.portfolio_values_sharpe, columns=['Date', 'Sharpe Portfolio Value'])
-        cvar_df = pd.DataFrame(self.portfolio_values_cvar, columns=['Date', 'CVaR Portfolio Value'])
-        benchmark_df = pd.DataFrame(self.portfolio_values_benchmark, columns=['Date', 'benchmark Portfolio Value'])
-        return sortino_df.merge(sharpe_df, on='Date').merge(cvar_df, on='Date').merge(benchmark_df, on='Date')
-
-    def get_weights_history(self):
-        sortino_weights = pd.DataFrame(self.weights_history_sortino, columns=['Date', 'Sortino Weights'])
-        sharpe_weights = pd.DataFrame(self.weights_history_sharpe, columns=['Date', 'Sharpe Weights'])
-        return sortino_weights.merge(sharpe_weights, on='Date', how='outer')
+        benchmark_df = pd.DataFrame(self.portfolio_values_benchmark, columns=['Date', 'Benchmark Portfolio Value'])
+        return sortino_df.merge(benchmark_df, on='Date')
 
     def plot_strategies(self):
+        """
+        Grafica la evolución de los portafolios y el benchmark.
+        """
         portfolio_values_df = self.get_portfolio_values()
         plt.figure(figsize=(14, 7))
         plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sharpe Portfolio Value'], label='Sharpe Portfolio')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['CVaR Portfolio Value'], label='CVaR Portfolio')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['benchmark Portfolio Value'], label='Benchmark Portfolio', color='red', linewidth=2)
-        plt.title('Evolución de los Portafolios')
+        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Benchmark Portfolio Value'], label='Benchmark', color='red', linewidth=2)
+        plt.title('Evolución del Portafolio y Benchmark')
         plt.xlabel('Fecha')
         plt.ylabel('Valor del Portafolio')
         plt.legend()
         plt.grid()
-
-
+        plt.show()
 
     def evaluate_portfolios(self):
         """
-        Calcula y devuelve un DataFrame con las métricas de rendimiento para los portafolios disponibles (Sortino, Sharpe, benchmark).
-        
+        Calcula y devuelve un DataFrame con métricas de rendimiento para los portafolios Sortino y Semivarianza, 
+        junto con el benchmark.
+    
         Returns:
-        - DataFrame con métricas de rendimiento: 'mean_return', 'CAGR', 'Sharpe Ratio', 'Sortino Ratio',
-          'Treynor Ratio', 'Volatility', 'VaR', 'Beta', 'Recovery Time', 'Tracking Error', 'Kurtosis', 'Max Drawdown'.
+        - DataFrame con métricas de rendimiento: 'mean_return', 'CAGR', 'Sharpe Ratio', 
+          'Sortino Ratio', 'Semivariance', 'Volatility', 'VaR', 'Beta', 'Max Drawdown', 'Tracking Error', 'Alpha'.
         """
-        # Obtener los valores del portafolio y calcular retornos diarios
         portfolio_values_df = self.get_portfolio_values()
         returns_df = portfolio_values_df.set_index('Date').pct_change().dropna()
-
-        # Calcular los retornos de cada portafolio
+    
         sortino_returns = returns_df['Sortino Portfolio Value']
-        sharpe_returns = returns_df['Sharpe Portfolio Value']
-        cvar_returns = returns_df['CVaR Portfolio Value']
-        benchmark_returns = returns_df['benchmark Portfolio Value']
-
-        # Función para calcular CAGR
+        benchmark_returns = returns_df['Benchmark Portfolio Value']
+    
         def calculate_cagr(portfolio_values):
-            # Validar si la serie tiene suficientes datos
-            if len(portfolio_values) == 0:
-                return np.nan
-            # Acceder al primer y último valor usando .iloc
             initial_value = portfolio_values.iloc[0]
             final_value = portfolio_values.iloc[-1]
             total_periods = len(portfolio_values)
-            years = total_periods / 252  # Asumiendo 252 días hábiles por año
+            years = total_periods / 252  
             cagr = (final_value / initial_value) ** (1 / years) - 1
             return cagr
-
-        # Función para calcular máxima caída (Max Drawdown)
+    
         def max_drawdown(portfolio_values):
             running_max = np.maximum.accumulate(portfolio_values)
             drawdown = (portfolio_values - running_max) / running_max
             return drawdown.min()
-
-        # Función para calcular tiempo de recuperación
-        def recovery_time(portfolio_values):
-            running_max = np.maximum.accumulate(portfolio_values)
-            drawdown = (portfolio_values - running_max) / running_max
-            drawdown_periods = np.where(drawdown < 0)[0]
-            if len(drawdown_periods) == 0:
-                return 0
-            recovery_periods = drawdown_periods[-1] - drawdown_periods[0]
-            return recovery_periods
-
-        # Función para calcular beta del portafolio
+    
         def calculate_beta(portfolio_returns, market_returns):
             covariance = np.cov(portfolio_returns, market_returns)[0, 1]
             market_variance = np.var(market_returns)
             return covariance / market_variance
-
-        # Calcular métricas
-        metrics = {}
-        for name, returns, values in [('Sortino', sortino_returns, portfolio_values_df['Sortino Portfolio Value']),
-                                      ('Sharpe', sharpe_returns, portfolio_values_df['Sharpe Portfolio Value']),
-                                      ('CVaR', cvar_returns, portfolio_values_df['CVaR Portfolio Value']),
-                                      ('benchmark', benchmark_returns, portfolio_values_df['benchmark Portfolio Value'])]:
-            # Métricas individuales
-            metrics[name] = {
-                'mean_return': returns.mean() * 252,
-                'CAGR': calculate_cagr(values),
-                'Sharpe Ratio': returns.mean() / returns.std() * np.sqrt(252),
-                'Sortino Ratio': returns.mean() / returns[returns < 0].std() * np.sqrt(252),
-                'Treynor Ratio': returns.mean() / calculate_beta(returns, benchmark_returns),
-                'Volatility': returns.std() * np.sqrt(252),
-                'VaR': np.percentile(returns, 5),
-                'Beta': calculate_beta(returns, benchmark_returns),
-                'Recovery Time': recovery_time(values),
-                'Tracking Error': np.sqrt(np.mean((returns - benchmark_returns) ** 2)) * np.sqrt(252),
-                'Kurtosis': kurtosis(returns),
-                'Max Drawdown': max_drawdown(values),
-                'Alpha': returns.mean() * 252 - calculate_beta(returns, benchmark_returns) * benchmark_returns.mean() * 252
-            }
-
-        metrics_df = pd.DataFrame(metrics).T
+    
+        def calculate_semivariance(returns):
+            downside_returns = returns[returns < 0]
+            return np.mean(downside_returns ** 2) * 252
+    
+        sortino_metrics = {
+            'mean_return': sortino_returns.mean() * 252,
+            'CAGR': calculate_cagr(portfolio_values_df['Sortino Portfolio Value']),
+            'Sharpe Ratio': sortino_returns.mean() / sortino_returns.std() * np.sqrt(252),
+            'Sortino Ratio': sortino_returns.mean() / sortino_returns[sortino_returns < 0].std() * np.sqrt(252),
+            'Volatility': sortino_returns.std() * np.sqrt(252),
+            'Semivariance': calculate_semivariance(sortino_returns),
+            'VaR (5%)': np.percentile(sortino_returns, 5),
+            'Beta': calculate_beta(sortino_returns, benchmark_returns),
+            'Max Drawdown': max_drawdown(portfolio_values_df['Sortino Portfolio Value']),
+            'Tracking Error': np.sqrt(np.mean((sortino_returns - benchmark_returns) ** 2)) * np.sqrt(252),
+            'Alpha': sortino_returns.mean() * 252 - calculate_beta(sortino_returns, benchmark_returns) * benchmark_returns.mean() * 252
+        }
+    
+        benchmark_metrics = {
+            'mean_return': benchmark_returns.mean() * 252,
+            'CAGR': calculate_cagr(portfolio_values_df['Benchmark Portfolio Value']),
+            'Volatility': benchmark_returns.std() * np.sqrt(252),
+            'Max Drawdown': max_drawdown(portfolio_values_df['Benchmark Portfolio Value'])
+        }
+    
+        metrics_df = pd.DataFrame([sortino_metrics, benchmark_metrics], index=['Sortino', 'Benchmark'])
         return metrics_df
