@@ -72,6 +72,41 @@ class LoadData:
 
         return closing_prices, self.financial_dataframes
 
+
+    def beta(self, start_date='2020-01-01', end_date=None, market_index="SPY"):
+    
+        defensive_universe = []
+        offensive_universe = []
+
+        market_data = yf.download(market_index, start=start_date, end=end_date, progress=False)
+        market_returns = market_data['Close'].pct_change().dropna()
+
+        # Descargar precios y calcular betas
+        for ticker, data in self.Load(start_date, end_date)[0].items():
+            stock_returns = data.pct_change().dropna()
+
+            # Encontrar la intersección de fechas
+            common_dates = market_returns.index.intersection(stock_returns.index)
+            stock_returns = stock_returns.loc[common_dates]
+            market_returns_aligned = market_returns.loc[common_dates]
+
+            # Asegurarse de que las longitudes de los datos coincidan
+            if len(stock_returns) == len(market_returns_aligned):
+                # Calcular covarianza y varianza para obtener beta
+                covariance = np.cov(stock_returns, market_returns_aligned)[0, 1]
+                variance = market_returns_aligned.var()
+                beta = covariance / variance
+
+                # Clasificar en universos
+                if beta <= 0.6:
+                    defensive_universe.append(ticker)
+                else:
+                    offensive_universe.append(ticker)
+            else:
+                print(f"Datos faltantes para {ticker}, no se incluye en el cálculo de beta.")
+
+        return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe}
+
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
         """
