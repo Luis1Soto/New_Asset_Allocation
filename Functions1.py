@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import kurtosis
 import warnings
-
+import quantstats as qs
 
 class LoadData:
     def __init__(self, folder_path):
@@ -304,6 +304,8 @@ class DynamicBacktest:
         self.weights_history_sortino = []
 
         self.benchmark_data = benchmark_data if benchmark_data is not None else self.download_benchmark_data(benchmark_ticker)
+        self.benchmark_data.index = pd.to_datetime(self.benchmark_data.index)
+
         self.benchmark_shares = None
 
         warnings.filterwarnings("ignore", category=RuntimeWarning, 
@@ -417,22 +419,46 @@ class DynamicBacktest:
         """
         return sum(shares.get(ticker, 0) * self.prices[ticker].asof(date) for ticker in selected_stocks)
 
+
     def get_portfolio_values(self):
-        """
-        Devuelve un DataFrame con los valores del portafolio y del benchmark.
-        """
         sortino_df = pd.DataFrame(self.portfolio_values_sortino, columns=['Date', 'Sortino Portfolio Value'])
         benchmark_df = pd.DataFrame(self.portfolio_values_benchmark, columns=['Date', 'Benchmark Portfolio Value'])
-        return sortino_df.merge(benchmark_df, on='Date')
+        
+        # Convertir 'Date' a datetime e indexar
+        sortino_df['Date'] = pd.to_datetime(sortino_df['Date'])
+        sortino_df.set_index('Date', inplace=True)
+        benchmark_df['Date'] = pd.to_datetime(benchmark_df['Date'])
+        benchmark_df.set_index('Date', inplace=True)
+        
+        # Generar un rango completo de fechas para asegurar la continuidad
+        all_dates = pd.date_range(start=sortino_df.index.min(), end=sortino_df.index.max(), freq='D')
+        sortino_df = sortino_df.reindex(all_dates).ffill().bfill()
+        benchmark_df = benchmark_df.reindex(all_dates).ffill().bfill()
+        
+        # Combinar y rellenar posibles NaN resultantes de la intersección de fechas
+        portfolio_values_df = sortino_df.join(benchmark_df, how='inner')
+        portfolio_values_df.ffill(inplace=True)  # Relleno hacia adelante
+    
+        return portfolio_values_df
+
+    def get_portfolio_series(self):
+        """
+        Convierte los valores del portafolio en una serie temporal.
+        """
+        sortino_df = pd.DataFrame(self.portfolio_values_sortino, columns=['Date', 'Sortino Portfolio Value'])
+        sortino_df.set_index('Date', inplace=True)
+        return sortino_df['Sortino Portfolio Value']
 
     def plot_strategies(self):
         """
         Grafica la evolución de los portafolios y el benchmark.
         """
         portfolio_values_df = self.get_portfolio_values()
+        
+        # Graficar usando el índice de fechas
         plt.figure(figsize=(14, 7))
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio')
-        plt.plot(portfolio_values_df['Date'], portfolio_values_df['Benchmark Portfolio Value'], label='Benchmark', color='red', linewidth=2)
+        plt.plot(portfolio_values_df.index, portfolio_values_df['Sortino Portfolio Value'], label='Sortino Portfolio')
+        plt.plot(portfolio_values_df.index, portfolio_values_df['Benchmark Portfolio Value'], label='Benchmark', color='red', linewidth=2)
         plt.title('Evolución del Portafolio y Benchmark')
         plt.xlabel('Fecha')
         plt.ylabel('Valor del Portafolio')
@@ -440,63 +466,50 @@ class DynamicBacktest:
         plt.grid()
         plt.show()
 
+        
     def evaluate_portfolios(self):
         """
-        Calcula y devuelve un DataFrame con métricas de rendimiento para los portafolios Sortino y Semivarianza, 
-        junto con el benchmark.
-    
+        Calcula métricas clave de comparación entre el portafolio y el benchmark.
+        
         Returns:
-        - DataFrame con métricas de rendimiento: 'mean_return', 'CAGR', 'Sharpe Ratio', 
-          'Sortino Ratio', 'Semivariance', 'Volatility', 'VaR', 'Beta', 'Max Drawdown', 'Tracking Error', 'Alpha'.
+            metrics_df (pd.DataFrame): DataFrame con las métricas calculadas para el portafolio y el benchmark.
         """
-        portfolio_values_df = self.get_portfolio_values()
-        returns_df = portfolio_values_df.set_index('Date').pct_change().dropna()
-    
-        sortino_returns = returns_df['Sortino Portfolio Value']
-        benchmark_returns = returns_df['Benchmark Portfolio Value']
-    
-        def calculate_cagr(portfolio_values):
-            initial_value = portfolio_values.iloc[0]
-            final_value = portfolio_values.iloc[-1]
-            total_periods = len(portfolio_values)
-            years = total_periods / 252  
-            cagr = (final_value / initial_value) ** (1 / years) - 1
-            return cagr
-    
-        def max_drawdown(portfolio_values):
-            running_max = np.maximum.accumulate(portfolio_values)
-            drawdown = (portfolio_values - running_max) / running_max
-            return drawdown.min()
-    
-        def calculate_beta(portfolio_returns, market_returns):
-            covariance = np.cov(portfolio_returns, market_returns)[0, 1]
-            market_variance = np.var(market_returns)
-            return covariance / market_variance
-    
-        def calculate_semivariance(returns):
-            downside_returns = returns[returns < 0]
-            return np.mean(downside_returns ** 2) * 252
-    
-        sortino_metrics = {
-            'mean_return': sortino_returns.mean() * 252,
-            'CAGR': calculate_cagr(portfolio_values_df['Sortino Portfolio Value']),
-            'Sharpe Ratio': sortino_returns.mean() / sortino_returns.std() * np.sqrt(252),
-            'Sortino Ratio': sortino_returns.mean() / sortino_returns[sortino_returns < 0].std() * np.sqrt(252),
-            'Volatility': sortino_returns.std() * np.sqrt(252),
-            'Semivariance': calculate_semivariance(sortino_returns),
-            'VaR (5%)': np.percentile(sortino_returns, 5),
-            'Beta': calculate_beta(sortino_returns, benchmark_returns),
-            'Max Drawdown': max_drawdown(portfolio_values_df['Sortino Portfolio Value']),
-            'Tracking Error': np.sqrt(np.mean((sortino_returns - benchmark_returns) ** 2)) * np.sqrt(252),
-            'Alpha': sortino_returns.mean() * 252 - calculate_beta(sortino_returns, benchmark_returns) * benchmark_returns.mean() * 252
+        port_series = self.get_portfolio_series()
+        
+        # Calcular las métricas clave usando quantstats
+        metrics = {
+            'CAGR': qs.stats.cagr(port_series),
+            'Sharpe Ratio': qs.stats.sharpe(port_series),
+            'Sortino Ratio': qs.stats.sortino(port_series),
+            'Max Drawdown': qs.stats.max_drawdown(port_series),
+            'Volatility': qs.stats.volatility(port_series),
+            'VaR (5%)': qs.stats.value_at_risk(port_series)
         }
     
+        # Calcular Beta manualmente
+        returns_df = pd.DataFrame({'Strategy': port_series.pct_change(), 'Benchmark': self.benchmark_data.pct_change()}).dropna()
+        cov_matrix = returns_df.cov()
+        metrics['Beta'] = cov_matrix.loc['Strategy', 'Benchmark'] / cov_matrix.loc['Benchmark', 'Benchmark']
+        
+        # Calcular Tracking Error manualmente
+        metrics['Tracking Error'] = np.sqrt(np.mean((returns_df['Strategy'] - returns_df['Benchmark']) ** 2)) * np.sqrt(252)
+    
+        # Calcular Alpha manualmente
+        strategy_return = qs.stats.comp(port_series)
+        benchmark_return = qs.stats.comp(self.benchmark_data)
+        metrics['Alpha'] = strategy_return - metrics['Beta'] * benchmark_return
+    
+        # Calcular métricas clave para el benchmark
         benchmark_metrics = {
-            'mean_return': benchmark_returns.mean() * 252,
-            'CAGR': calculate_cagr(portfolio_values_df['Benchmark Portfolio Value']),
-            'Volatility': benchmark_returns.std() * np.sqrt(252),
-            'Max Drawdown': max_drawdown(portfolio_values_df['Benchmark Portfolio Value'])
+            'CAGR': qs.stats.cagr(self.benchmark_data),
+            'Sharpe Ratio': qs.stats.sharpe(self.benchmark_data),
+            'Sortino Ratio': qs.stats.sortino(self.benchmark_data),
+            'Max Drawdown': qs.stats.max_drawdown(self.benchmark_data),
+            'Volatility': qs.stats.volatility(self.benchmark_data),
+            'VaR (5%)': qs.stats.value_at_risk(self.benchmark_data)
         }
     
-        metrics_df = pd.DataFrame([sortino_metrics, benchmark_metrics], index=['Sortino', 'Benchmark'])
+        metrics_df = pd.DataFrame([metrics, benchmark_metrics], index=['Strategy', 'Benchmark']).T
         return metrics_df
+
+
