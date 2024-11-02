@@ -9,6 +9,12 @@ from scipy.stats import kurtosis
 import warnings
 import quantstats as qs
 
+import os
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import pickle
+
 class LoadData:
     def __init__(self, folder_path):
         """
@@ -52,29 +58,49 @@ class LoadData:
         """
         return self.financial_dataframes
 
-    def Load(self, start_date='2020-01-01', end_date=None):
+    def load_prices(self, start_date='2020-01-01', end_date=None):
         """
-        Download daily closing prices for the tickers processed.
-        
+        Download daily closing prices for the tickers processed or load from file if it exists.
+
         Parameters:
         start_date (str): The start date for downloading historical data (YYYY-MM-DD format).
         end_date (str): The end date for downloading historical data. If None, today's date is used.
-        
+
         Returns:
         dict: A dictionary where keys are tickers and values are dataframes of daily closing prices.
         """
-        closing_prices = {}
+        prices_file = os.path.join(self.folder_path, "prices.pkl")
 
-        for ticker in self.financial_dataframes.keys():
-            stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-            if not stock_data.empty:
-                closing_prices[ticker] = stock_data['Close']
-
+        # Cargar precios desde archivo si existe
+        if os.path.exists(prices_file):
+            with open(prices_file, "rb") as f:
+                closing_prices = pickle.load(f)
+            print("Datos cargados desde el archivo prices.pkl")
+        else:
+            # Descargar precios y guardar en archivo si no existe
+            closing_prices = {}
+            for ticker in self.financial_dataframes.keys():
+                stock_data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                if not stock_data.empty:
+                    closing_prices[ticker] = stock_data['Close']
+            with open(prices_file, "wb") as f:
+                pickle.dump(closing_prices, f)
+            print("Datos descargados y guardados en prices.pkl")
+        
         return closing_prices, self.financial_dataframes
 
-
     def beta(self, start_date='2020-01-01', end_date=None, market_index="SPY"):
-    
+        """
+        Calculate the beta of each ticker compared to the market index.
+        
+        Parameters:
+        start_date (str): Start date for historical data (YYYY-MM-DD format).
+        end_date (str): End date for historical data.
+        market_index (str): Ticker symbol of the market index, default is 'SPY'.
+        
+        Returns:
+        dict: Universes of defensive and offensive stocks based on beta values.
+        """
         defensive_universe = []
         offensive_universe = []
 
@@ -82,7 +108,7 @@ class LoadData:
         market_returns = market_data['Close'].pct_change().dropna()
 
         # Descargar precios y calcular betas
-        for ticker, data in self.Load(start_date, end_date)[0].items():
+        for ticker, data in self.load_prices(start_date, end_date)[0].items():
             stock_returns = data.pct_change().dropna()
 
             # Encontrar la intersección de fechas
