@@ -58,7 +58,7 @@ class LoadData:
         """
         return self.financial_dataframes
 
-    def load_prices(self, start_date='2020-01-01', end_date=None):
+    def Load(self, start_date='2020-01-01', end_date=None):
         """
         Download daily closing prices for the tickers processed or load from file if it exists.
 
@@ -124,7 +124,7 @@ class LoadData:
                 beta = covariance / variance
 
                 # Clasificar en universos
-                if beta <= 0.6:
+                if beta <= 0.75:
                     defensive_universe.append(ticker)
                 else:
                     offensive_universe.append(ticker)
@@ -498,9 +498,10 @@ class DynamicBacktest:
         
         # Combinar y rellenar posibles NaN resultantes de la intersección de fechas
         portfolio_values_df = sortino_df.join(benchmark_df, how='inner')
-        portfolio_values_df.ffill(inplace=True)  # Relleno hacia adelante
-    
+        portfolio_values_df.ffill(inplace=True)
+        
         return portfolio_values_df
+
 
     def get_portfolio_series(self):
         """
@@ -547,18 +548,21 @@ class DynamicBacktest:
             'VaR (5%)': qs.stats.value_at_risk(port_series)
         }
     
-        # Calcular Beta manualmente
+        # Calcular Beta y Tracking Error manualmente con comprobaciones para evitar overflow
         returns_df = pd.DataFrame({'Strategy': port_series.pct_change(), 'Benchmark': self.benchmark_data.pct_change()}).dropna()
         cov_matrix = returns_df.cov()
-        metrics['Beta'] = cov_matrix.loc['Strategy', 'Benchmark'] / cov_matrix.loc['Benchmark', 'Benchmark']
+        metrics['Beta'] = cov_matrix.loc['Strategy', 'Benchmark'] / cov_matrix.loc['Benchmark', 'Benchmark'] if cov_matrix.loc['Benchmark', 'Benchmark'] != 0 else np.nan
         
-        # Calcular Tracking Error manualmente
-        metrics['Tracking Error'] = np.sqrt(np.mean((returns_df['Strategy'] - returns_df['Benchmark']) ** 2)) * np.sqrt(252)
+        # Tracking Error con control de valores válidos
+        metrics['Tracking Error'] = np.sqrt(np.mean((returns_df['Strategy'] - returns_df['Benchmark']) ** 2)) * np.sqrt(252) if not returns_df.empty else np.nan
     
-        # Calcular Alpha manualmente
+        # Cálculo de Alpha solo si Beta y benchmark_return son válidos
         strategy_return = qs.stats.comp(port_series)
         benchmark_return = qs.stats.comp(self.benchmark_data)
-        metrics['Alpha'] = strategy_return - metrics['Beta'] * benchmark_return
+        if np.isfinite(metrics['Beta']) and np.isfinite(benchmark_return):
+            metrics['Alpha'] = strategy_return - metrics['Beta'] * benchmark_return
+        else:
+            metrics['Alpha'] = np.nan
     
         # Calcular métricas clave para el benchmark
         benchmark_metrics = {
@@ -572,5 +576,4 @@ class DynamicBacktest:
     
         metrics_df = pd.DataFrame([metrics, benchmark_metrics], index=['Strategy', 'Benchmark']).T
         return metrics_df
-
 
