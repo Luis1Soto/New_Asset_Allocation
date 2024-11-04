@@ -8,11 +8,6 @@ import matplotlib.pyplot as plt
 from scipy.stats import kurtosis
 import warnings
 import quantstats as qs
-
-import os
-import pandas as pd
-import numpy as np
-import yfinance as yf
 import pickle
 
 class LoadData:
@@ -108,7 +103,7 @@ class LoadData:
         market_returns = market_data['Close'].pct_change().dropna()
 
         # Descargar precios y calcular betas
-        for ticker, data in self.load_prices(start_date, end_date)[0].items():
+        for ticker, data in self.Load(start_date, end_date)[0].items():
             stock_returns = data.pct_change().dropna()
 
             # Encontrar la intersección de fechas
