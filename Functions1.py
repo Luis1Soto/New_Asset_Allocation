@@ -528,52 +528,69 @@ class DynamicBacktest:
         plt.grid()
         plt.show()
 
-        
+
     def evaluate_portfolios(self):
         """
-        Calcula métricas clave de comparación entre el portafolio y el benchmark.
+        Calcula métricas clave de comparación entre el portafolio y el benchmark,
+        con control adicional para valores extremos y supresión de advertencias de overflow.
         
         Returns:
             metrics_df (pd.DataFrame): DataFrame con las métricas calculadas para el portafolio y el benchmark.
         """
-        port_series = self.get_portfolio_series()
-        
-        # Calcular las métricas clave usando quantstats
-        metrics = {
-            'CAGR': qs.stats.cagr(port_series),
-            'Sharpe Ratio': qs.stats.sharpe(port_series),
-            'Sortino Ratio': qs.stats.sortino(port_series),
-            'Max Drawdown': qs.stats.max_drawdown(port_series),
-            'Volatility': qs.stats.volatility(port_series),
-            'VaR (5%)': qs.stats.value_at_risk(port_series)
-        }
+        # Configuración temporal para ignorar advertencias de overflow en numpy
+        old_settings = np.seterr(over='ignore')
     
-        # Calcular Beta y Tracking Error manualmente con comprobaciones para evitar overflow
-        returns_df = pd.DataFrame({'Strategy': port_series.pct_change(), 'Benchmark': self.benchmark_data.pct_change()}).dropna()
-        cov_matrix = returns_df.cov()
-        metrics['Beta'] = cov_matrix.loc['Strategy', 'Benchmark'] / cov_matrix.loc['Benchmark', 'Benchmark'] if cov_matrix.loc['Benchmark', 'Benchmark'] != 0 else np.nan
-        
-        # Tracking Error con control de valores válidos
-        metrics['Tracking Error'] = np.sqrt(np.mean((returns_df['Strategy'] - returns_df['Benchmark']) ** 2)) * np.sqrt(252) if not returns_df.empty else np.nan
+        try:
+            # Obtener series de portafolio y benchmark sin límites para Beta y Alpha
+            port_series = self.get_portfolio_series()
+            benchmark_data = self.benchmark_data
     
-        # Cálculo de Alpha solo si Beta y benchmark_return son válidos
-        strategy_return = qs.stats.comp(port_series)
-        benchmark_return = qs.stats.comp(self.benchmark_data)
-        if np.isfinite(metrics['Beta']) and np.isfinite(benchmark_return):
-            metrics['Alpha'] = strategy_return - metrics['Beta'] * benchmark_return
-        else:
-            metrics['Alpha'] = np.nan
+            # Asegurar que ambos están alineados en frecuencia semanal para mayor estabilidad
+            strategy_weekly = port_series.resample('W').last().pct_change().dropna()
+            benchmark_weekly = benchmark_data.resample('W').last().pct_change().dropna()
     
-        # Calcular métricas clave para el benchmark
-        benchmark_metrics = {
-            'CAGR': qs.stats.cagr(self.benchmark_data),
-            'Sharpe Ratio': qs.stats.sharpe(self.benchmark_data),
-            'Sortino Ratio': qs.stats.sortino(self.benchmark_data),
-            'Max Drawdown': qs.stats.max_drawdown(self.benchmark_data),
-            'Volatility': qs.stats.volatility(self.benchmark_data),
-            'VaR (5%)': qs.stats.value_at_risk(self.benchmark_data)
-        }
+            # Alinear fechas de ambos retornos semanales
+            aligned_returns = pd.DataFrame({'Strategy': strategy_weekly, 'Benchmark': benchmark_weekly}).dropna()
     
-        metrics_df = pd.DataFrame([metrics, benchmark_metrics], index=['Strategy', 'Benchmark']).T
-        return metrics_df
+            # Calcular métricas clave usando quantstats para el portafolio
+            metrics = {
+                'CAGR': qs.stats.cagr(port_series),
+                'Sharpe Ratio': qs.stats.sharpe(port_series),
+                'Sortino Ratio': qs.stats.sortino(port_series),
+                'Max Drawdown': qs.stats.max_drawdown(port_series),
+                'Volatility': qs.stats.volatility(port_series),
+                'VaR (5%)': qs.stats.value_at_risk(port_series)
+            }
+    
+            # Calcular Alpha y Beta manualmente con datos semanales alineados
+            try:
+                cov_matrix = aligned_returns.cov()
+                metrics['Beta'] = cov_matrix.loc['Strategy', 'Benchmark'] / cov_matrix.loc['Benchmark', 'Benchmark']
+                metrics['Alpha'] = (aligned_returns['Strategy'].mean() - metrics['Beta'] * aligned_returns['Benchmark'].mean()) * 52  # Anualizar Alpha
+            except Exception as e:
+                print(f"Error calculating Alpha and Beta manually: {e}")
+                metrics['Beta'] = np.nan
+                metrics['Alpha'] = np.nan
+    
+            # Calcular métricas clave para el benchmark, estableciendo Beta en 1 y Alpha en 0
+            benchmark_metrics = {
+                'CAGR': qs.stats.cagr(benchmark_data),
+                'Sharpe Ratio': qs.stats.sharpe(benchmark_data),
+                'Sortino Ratio': qs.stats.sortino(benchmark_data),
+                'Max Drawdown': qs.stats.max_drawdown(benchmark_data),
+                'Volatility': qs.stats.volatility(benchmark_data),
+                'VaR (5%)': qs.stats.value_at_risk(benchmark_data),
+                'Beta': 1,    # Beta fijo para el benchmark
+                'Alpha': 0    # Alpha fijo para el benchmark
+            }
+    
+            metrics_df = pd.DataFrame([metrics, benchmark_metrics], index=['Strategy', 'Benchmark']).T
+            return metrics_df
+    
+        finally:
+            # Restaurar configuración original de numpy
+            np.seterr(**old_settings)
+
+
+
 
