@@ -25,7 +25,7 @@ class LoadData:
         Process all Excel files in the given folder and extract financial ratios.
         """
         from datetime import datetime
-    
+
         def convert_to_date_format(date_str):
             """
             Convierte una fecha en formato 'MMM 'YY' a 'YYYY-MM'.
@@ -43,9 +43,18 @@ class LoadData:
                 financial_data = first_sheet_df.iloc[10:, :].reset_index(drop=True)
                 financial_data.columns = dates
                 financial_data.rename(columns={financial_data.columns[0]: 'Financial Ratio'}, inplace=True)
-                self.financial_dataframes[ticker] = financial_data
     
+                # Renombrar la fila 'Total Shares Outstanding  (M) (M)' si existe en la columna 'Financial Ratio'
+                financial_data['Financial Ratio'] = financial_data['Financial Ratio'].replace(
+                    'Total Shares Outstanding  (M) (M)', 'Total Shares Outstanding  (M)'
+                )
+                financial_data['Financial Ratio'] = financial_data['Financial Ratio'].replace(
+                    'Total Shares Outstanding (M)', 'Total Shares Outstanding  (M)'
+                )
+                self.financial_dataframes[ticker] = financial_data
+
         print(f"Data processed for the following tickers: {', '.join(self.financial_dataframes.keys())}")
+
 
     def get_financial_dataframes(self):
         """
@@ -56,16 +65,16 @@ class LoadData:
     def Load(self, start_date='2020-01-01', end_date=None):
         """
         Download daily closing prices for the tickers processed or load from file if it exists.
-
+    
         Parameters:
         start_date (str): The start date for downloading historical data (YYYY-MM-DD format).
         end_date (str): The end date for downloading historical data. If None, today's date is used.
-
+    
         Returns:
         dict: A dictionary where keys are tickers and values are dataframes of daily closing prices.
         """
         prices_file = os.path.join(self.folder_path, "prices.pkl")
-
+    
         # Cargar precios desde archivo si existe
         if os.path.exists(prices_file):
             with open(prices_file, "rb") as f:
@@ -81,8 +90,23 @@ class LoadData:
             with open(prices_file, "wb") as f:
                 pickle.dump(closing_prices, f)
             print("Datos descargados y guardados en prices.pkl")
-        
+    
+        # Encontrar la fecha mínima de los precios
+        min_price_date = min(
+            data.index.min() for data in closing_prices.values() if not data.empty
+        )
+    
+        # Recortar los datos financieros a partir de la fecha mínima de los precios
+        for ticker, df in self.financial_dataframes.items():
+            # Convertir las columnas de fechas a formato datetime
+            date_columns = pd.to_datetime(df.columns[1:], format='%Y-%m', errors='coerce')
+            valid_columns = ['Financial Ratio'] + [
+                col for col, date in zip(df.columns[1:], date_columns) if date and date >= min_price_date
+            ]
+            self.financial_dataframes[ticker] = df[valid_columns]
+    
         return closing_prices, self.financial_dataframes
+
 
     def beta(self, start_date='2020-01-01', end_date=None, market_index="SPY"):
         """
@@ -98,35 +122,38 @@ class LoadData:
         """
         defensive_universe = []
         offensive_universe = []
-
+        required_ratios = ['Return on Common Equity', 'Operating Margin', 'Cash Flow per Share', 
+                           'Total Shares Outstanding  (M)', 'LT Debt/Total Equity', 'Current Ratio (x)']
+    
         market_data = yf.download(market_index, start=start_date, end=end_date, progress=False)
         market_returns = market_data['Close'].pct_change().dropna()
-
-        # Descargar precios y calcular betas
+    
         for ticker, data in self.Load(start_date, end_date)[0].items():
             stock_returns = data.pct_change().dropna()
-
-            # Encontrar la intersección de fechas
+    
             common_dates = market_returns.index.intersection(stock_returns.index)
             stock_returns = stock_returns.loc[common_dates]
             market_returns_aligned = market_returns.loc[common_dates]
-
-            # Asegurarse de que las longitudes de los datos coincidan
+    
             if len(stock_returns) == len(market_returns_aligned):
-                # Calcular covarianza y varianza para obtener beta
                 covariance = np.cov(stock_returns, market_returns_aligned)[0, 1]
                 variance = market_returns_aligned.var()
                 beta = covariance / variance
-
-                # Clasificar en universos
+    
+                has_required_ratios = all(
+                    ratio in self.financial_dataframes[ticker]['Financial Ratio'].values 
+                    for ratio in required_ratios
+                )
+    
                 if beta <= 0.75:
                     defensive_universe.append(ticker)
-                else:
+                elif has_required_ratios:  # Solo agregar al universo offensive si cumple los ratios
                     offensive_universe.append(ticker)
             else:
                 print(f"Datos faltantes para {ticker}, no se incluye en el cálculo de beta.")
-
+    
         return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe}
+
 
 class TestStrategy:
     def __init__(self, prices, financials, offensive, defensive, protective):
