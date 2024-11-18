@@ -122,11 +122,13 @@ class LoadData:
         """
         defensive_universe = []
         offensive_universe = []
+        canary_universe = []
     
         market_data = yf.download(market_index, start=start_date, end=end_date, progress=False)
         market_returns = market_data['Close'].pct_change().dropna()
     
         for ticker, data in self.Load(start_date, end_date)[0].items():
+            #canary_universe.append(ticker)
             stock_returns = data.pct_change().dropna()
     
             common_dates = market_returns.index.intersection(stock_returns.index)
@@ -140,12 +142,15 @@ class LoadData:
     
                 if beta <= 0.6:
                     defensive_universe.append(ticker)
-                else :  # Solo agregar al universo offensive si cumple los ratios
+                else: 
                     offensive_universe.append(ticker)
+                if beta >= 0.9:
+                   canary_universe.append(ticker)
+                
             else:
                 print(f"Datos faltantes para {ticker}, no se incluye en el cálculo de beta.")
     
-        return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe}
+        return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe, "canary_universe": canary_universe}
 
 
 class TestStrategy:
