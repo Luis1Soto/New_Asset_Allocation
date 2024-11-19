@@ -122,13 +122,13 @@ class LoadData:
         """
         defensive_universe = []
         offensive_universe = []
-        required_ratios = ['Return on Common Equity', 'Operating Margin', 'Cash Flow per Share', 
-                           'Total Shares Outstanding  (M)', 'LT Debt/Total Equity', 'Current Ratio (x)']
+        canary_universe = []
     
         market_data = yf.download(market_index, start=start_date, end=end_date, progress=False)
         market_returns = market_data['Close'].pct_change().dropna()
     
         for ticker, data in self.Load(start_date, end_date)[0].items():
+            #canary_universe.append(ticker)
             stock_returns = data.pct_change().dropna()
     
             common_dates = market_returns.index.intersection(stock_returns.index)
@@ -140,19 +140,17 @@ class LoadData:
                 variance = market_returns_aligned.var()
                 beta = covariance / variance
     
-                has_required_ratios = all(
-                    ratio in self.financial_dataframes[ticker]['Financial Ratio'].values 
-                    for ratio in required_ratios
-                )
-    
-                if beta <= 0.75:
+                if beta <= 0.6:
                     defensive_universe.append(ticker)
-                elif has_required_ratios:  # Solo agregar al universo offensive si cumple los ratios
+                else: 
                     offensive_universe.append(ticker)
+                if beta >= 0.9:
+                   canary_universe.append(ticker)
+                
             else:
                 print(f"Datos faltantes para {ticker}, no se incluye en el cálculo de beta.")
     
-        return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe}
+        return {"defensive_universe": defensive_universe, "offensive_universe": offensive_universe, "canary_universe": canary_universe}
 
 
 class TestStrategy:
@@ -207,8 +205,8 @@ class TestStrategy:
             score += 1
         if row['Cash Flow per Share'] > 0:
             score += 1
-        if row['Current Ratio (x)'] > np.roll(row['Current Ratio (x)'], shift=1):
-            score += 1
+        #if row['Current Ratio (x)'] > np.roll(row['Current Ratio (x)'], shift=1):
+            #score += 1
         if row['Total Debt/Equity (%)'] < np.roll(row['Total Debt/Equity (%)'], shift=1):
             score += 1
         if row['Total Shares Outstanding  (M)'] <= np.roll(row['Total Shares Outstanding  (M)'], shift=1):
@@ -267,6 +265,7 @@ class TestStrategy:
         else:
             return "Defensive"
 
+
     def select_top_stocks(self, universe, decision_date):
         """
         Selecciona las mejores acciones basadas en los ratios financieros más recientes en la fecha de decisión.
@@ -299,7 +298,8 @@ class TestStrategy:
                         most_recent_column = date_mapping[most_recent_date]
                         most_recent_data = financial_data[['Financial Ratio', most_recent_column]]
                         
-                        ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
+                        #ratios_data = most_recent_data.set_index('Financial Ratio').loc[self.ratios][most_recent_column]
+                        ratios_data = (most_recent_data.set_index('Financial Ratio').reindex(self.ratios, fill_value=np.nan)[most_recent_column])
                         ratios_data.name = ticker
                         df = pd.concat([df, pd.DataFrame([ratios_data])])
             
@@ -322,7 +322,7 @@ class TestStrategy:
         
         elif universe == "Defensive":
             return self.defensive
-    
+
         
     def run_strategy(self, start_date, end_date=None):
         """
